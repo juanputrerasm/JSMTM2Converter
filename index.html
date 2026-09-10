@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JSMTM2Converter</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand"><h1>JSMTM2Converter</h1><p>4x4 Evo 1 & 2 to MTM2 HD track converter</p></div>
+      <div class="badge">POD2 → POD1 · Evo SIT v6/v7 → MTM2 SIT/SI2</div>
+    </header>
+    <main>
+      <section class="panel intro">
+        <h2>Track archive</h2>
+        <div id="drop-zone" class="drop-zone">
+          <input id="file-input" type="file" accept=".pod" hidden>
+          <button id="pick-button" type="button">Open Evo POD2</button>
+          <span id="file-label">or drop a .POD file here</span>
+        </div>
+        <fieldset class="options">
+          <legend>Conversion options</legend>
+          <label><input id="opt-hd-art" type="checkbox" checked>
+            <span><strong>Use HD art</strong><em>PNG textures at their own colour depth. DX11 and Vulkan draw them as authored; the software renderer cannot read them at all.</em></span></label>
+          <label><input id="opt-raw-fallback" type="checkbox">
+            <span><strong>Add RAW/ACT fallback</strong><em>Also pack the legacy 8-bit pair beside each PNG. Larger POD, and the situation file becomes <code>.SIT</code> so an unmodified 1998 install can see the track.</em></span></label>
+          <label><input id="opt-veg-noncollide" type="checkbox" checked>
+            <span><strong>Vegetation is non-collide</strong><em>Trees use MTM2 box type 7, "drive thru".</em></span></label>
+          <label><input id="opt-all-noncollide" type="checkbox">
+            <span><strong>All objects non-collide</strong><em>Every converted scenery object becomes drive-thru. Checkpoints keep type 6 and are still scored.</em></span></label>
+        </fieldset>
+        <div class="actions">
+          <button id="convert-button" type="button" class="primary" disabled>Convert to MTM2</button>
+          <button id="download-button" type="button" hidden>Download POD1</button>
+          <button id="preview-button" type="button" hidden>Preview in JSTrackViewer</button>
+        </div>
+      </section>
+      <section class="panel terminal-panel">
+        <div class="terminal-title"><h2>Conversion log</h2><span id="progress-percent">0%</span></div>
+        <div class="progress-track"><div id="progress-bar"></div></div>
+        <div id="terminal" class="terminal" role="log" aria-live="polite"></div>
+      </section>
+      <aside class="note">Runs locally in your browser. The converter preserves Evo's 256×256 horizontal terrain grid, but MTM2 only has an 8-bit height field; altitude is compressed with extra precision around the racing course. Inspect the result in JSTrackViewer.</aside>
+    </main>
+  </div>
+  <script type="module" src="./src/main.js?build=2026-09-10.20-gate-height"></script>
+</body>
+</html>
