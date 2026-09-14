@@ -184,13 +184,58 @@ function sendToTrackViewer() {
   trackViewer.postMessage({ type: "jstrackviewer:pod", name: result.filename, blob: result.blob }, TRACK_VIEWER_URL.origin);
   return true;
 }
-previewButton.addEventListener("click", () => {
+/*
+  Whether the viewer is actually there, asked when the button is clicked rather than at load.
+
+  Both viewers are meant to sit beside this page - published that way they are sibling paths on
+  one origin, which is exactly what lets the handoff above post a Blob across - but nothing
+  guarantees that layout. Serve this converter on its own, or open it over file://, and there is
+  no viewer to hand anything to; window.open would then leave a dead tab rather than an answer,
+  so say so instead. A viewer that answers is remembered, a silent one is not, so starting it and
+  clicking again works without reloading this page.
+*/
+const viewersFound = new Set();
+async function viewerReachable(url) {
+  if (viewersFound.has(url.href)) return true;
+  const stop = new AbortController();
+  const timer = setTimeout(() => stop.abort(), 6000);
+  try {
+    const response = await fetch(url, { method: "HEAD", cache: "no-store", signal: stop.signal });
+    if (!response.ok) return false;
+    viewersFound.add(url.href);
+    return true;
+  } catch {
+    // A blocked, refused or cross-origin request all mean the same thing here: nothing to open.
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+previewButton.addEventListener("click", async () => {
   if (!result?.blob) return;
-  if (result.stats?.kind === "truck") {
+  const truck = result.stats?.kind === "truck";
+  const viewerName = truck ? "JSTruckViewer" : "JSTrackViewer";
+  const viewerUrl = truck ? new URL("../JSTruckViewer/", location.href) : TRACK_VIEWER_URL;
+  /*
+    A tab this page opened and still holds has already proved the viewer is there, so it is sent
+    the POD without a probe. Everything else is checked first.
+  */
+  if (!(!truck && trackViewer && !trackViewer.closed)) {
+    previewButton.disabled = true;
+    const reachable = await viewerReachable(viewerUrl);
+    previewButton.disabled = false;
+    if (!reachable) {
+      // The plain address, without the handoff flag the viewer is opened with internally.
+      const viewerHome = `${viewerUrl.origin}${viewerUrl.pathname}`;
+      log(`${viewerName} is not answering at ${viewerHome}, so there is nothing to preview into. Open ${viewerName} there first - it has to be served beside this converter - then click Preview again.`, "error");
+      log(`Your converted ${truck ? "truck" : "track"} is not lost: Download ${result.filename} still writes it out, and ${viewerName} can open that file directly.`, "detail");
+      return;
+    }
+  }
+  if (truck) {
     // JSTruckViewer takes the in-memory POD under the query name it already understands.
-    const viewer = new URL("../JSTruckViewer/", location.href);
-    viewer.searchParams.set("file", resultUrl);
-    window.open(viewer, "_blank", "noopener");
+    viewerUrl.searchParams.set("file", resultUrl);
+    window.open(viewerUrl, "_blank", "noopener");
     return;
   }
   if (trackViewer && !trackViewer.closed) {

@@ -61,7 +61,8 @@ Open the [live application](https://juanputrerasm.github.io/JSMTM2Converter/), t
 5. Download the generated POD1 archive.
 6. Optionally choose **Preview in JSTrackViewer** or **Preview in JSTruckViewer**, whichever the
    output is, before opening it in MTM2. The track viewer tab stays connected: convert again and
-   it reloads with the new result.
+   it reloads with the new result. If the viewer is not reachable beside this page, the log says
+   so and the download still holds the converted POD.
 
 > [!WARNING]
 > This is an automatic conversion between engines with different terrain, material, animation,
@@ -213,6 +214,13 @@ POD into it as a Blob. It does not pass a `blob:` URL, which resolves only while
 and only where the browser agrees the two pages share storage - the case that failed when the
 converter was not served beside the viewer. The tab stays connected, so each later conversion
 reloads it automatically.
+
+Both preview buttons check that the viewer is actually there before opening anything. The
+viewers are expected beside this page, at `../JSTrackViewer/` and `../JSTruckViewer/`, which is
+how they are published; serve the converter on its own, or open it over `file://`, and there is
+nothing to hand a POD to. Rather than leave a dead tab, the button reports the address it tried
+and asks for the viewer to be opened there. The check runs on the click, not at page load, so
+starting a viewer afterwards and clicking again works with no reload.
 
 ## The unavoidable terrain downgrade
 
