@@ -186,19 +186,44 @@ function course(out, value, terrain) {
 function placed(position, terrain) {
   const [x = 4096, y = 0, z = 4096] = position ?? [];
   const sourceGround = sampleTerrain(terrain.source, x / 32, z / 32);
-  const targetGround = terrain.mapHeight(sourceGround);
+  const targetGround = drawnGround(terrain.raw, x / 32, z / 32);
   // MTM2 renders SIT height as 1.5*Y and terrain as 3*RAW. Preserve the source clearance
   // using the same vertical scale selected for terrain, rather than multiplying it twice.
-  return [num(x), num(2 * targetGround + 2 * terrain.scale * (y - sourceGround)), num(z)];
+  // That is the AUTOMATIC fit, not the user's height factor: the factor makes hills taller,
+  // and an object's height above its own patch of ground is part of the object, not a hill.
+  return [num(x), num(2 * targetGround + 2 * objectScale(terrain) * (y - sourceGround)), num(z)];
 }
 
 function placedOnGround(tree, terrain) {
-  const sourceGround = sampleTerrain(terrain.source, tree.x / 32, tree.z / 32);
-  const targetGround = terrain.mapHeight(sourceGround);
-  // The BIN variant is already scaled to the authored tree height. MTM2 renders a SIT Y
-  // coordinate at 1.5 world units, so add 2/3 of the model-origin clearance above ground.
-  return [num(tree.x), num(2 * targetGround + (2 / 3) * tree.clearance), num(tree.z)];
+  /*
+    Grounded on the LOWEST surface under the TRUNK, not on the one point the tree stands at.
+
+    A trunk has width - 5.6 to 12.1 world units across on Baja Beach's four trees - and on a
+    slope the ground under its downhill side is lower than the ground under its middle, so a
+    tree planted by its centre hangs over the hill by however much the surface falls across
+    that width. It is invisible on the flat and unmistakable on a ridge: 90% of Baja's trees
+    stood more than a unit clear of the hill that way, half of them more than 3.6, the worst
+    24.4.
+
+    ⛔ IT IS THE LOWEST READING, AND THE SIGN IS THE WHOLE FIX. The base has to be at or under
+    the ground at every point of the footprint, so it belongs at the minimum; grounding it on
+    the maximum raises the tree by that same drop and makes the overhang worse, which is what
+    a build that did exactly that looked like on a ridge. The uphill side of the trunk goes
+    into the hill, the side nobody can see, and level ground is unaffected because there the
+    readings are all the same.
+  */
+  const targetGround = footprintGround(terrain.raw, tree.x / 32, tree.z / 32, (tree.footprint ?? 0) / 32) - GROUND_MARGIN;
+  /*
+    A tree is lifted by its own half height, so that its trunk meets the ground. That is a
+    distance measured against the model, so it converts at 2 world units per Evo foot and a SIT
+    altitude is 1.5 world units - hence twice the object scale. It used to be 2/3 of the
+    clearance, exactly half of what the model needs, which buried every tree by a third of its
+    half height: 13 units of JUNGLE80, 19 of JUNGLE115, worse the taller the tree and worse
+    again on a track whose terrain had to be squeezed harder.
+  */
+  return [num(tree.x), num(2 * targetGround + 2 * objectScale(terrain) * tree.clearance), num(tree.z)];
 }
+
 
 /*
   A checkpoint gate: its box, and the altitude that box has to sit at.
@@ -223,11 +248,24 @@ function placedOnGround(tree, terrain) {
 */
 const RAW_TO_WORLD = 3, SIT_TO_WORLD = 1.5;
 
+/*
+  Half a level of extra sink for a planted model, which is 1.5 world units or about nine inches.
+
+  Sampling a trunk's footprint cannot find the very lowest point of a piecewise surface exactly,
+  and it does not have to: the residual measured against a 449-point reference is a tenth of a
+  unit for 93% of Baja Beach's trees and 1.3 at the very worst. This margin is larger than that
+  worst case, so nothing is left hanging, and it is far too small to see on a tree between 40 and
+  115 feet tall. It also absorbs the hundredths lost when an altitude is written to two decimals.
+*/
+const GROUND_MARGIN = 0.5;
+
 function checkpointBox(box, terrain) {
   const ipos = placed(box.position, terrain);
   const [width = 64, up = 64, depth = 64] = box.size ?? [];
   const [x = 0, , z = 0] = box.position ?? [];
-  const full = up * RAW_TO_WORLD * terrain.scale;
+  // The gate's own height follows the automatic fit, like every object's; the reach to the
+  // ground below still measures the terrain as converted, factor and all.
+  const full = up * RAW_TO_WORLD * objectScale(terrain);
   const top = Number(ipos[1]) * SIT_TO_WORLD + full / 2;
   /*
     And then make sure it reaches the ground, because a gate that hangs is a gate the truck can
@@ -255,6 +293,24 @@ function boxTypeFor(box, options) {
   return options.allObjectsNonCollide ? DRIVE_THRU : 0;
 }
 
+/*
+  The vertical scale for anything that belongs to an object rather than to the terrain.
+
+  ⚠ IT IS THE TRUE SCALE, NOT THE TRACK'S FITTED ONE. A model is drawn at its own size however
+  much the terrain had to be squeezed to fit MTM2's 256 height levels, so a distance measured
+  against a model - a tree's half height, a rock's origin above its base, a gate's height -
+  converts at the constant the world uses and not at this track's fit: 2/3 RAW levels per Evo
+  foot, which is 2 world units per foot, the same as the horizontal, where a 64-unit MTM2 cell
+  covers a 32-foot Evo one.
+
+  Measured, not assumed. Across 604 stock MTM2 placements of flat-bottomed models standing on
+  dead-flat ground, a model's own lowest vertex lands exactly on the terrain when one BIN unit
+  (1/256) is worth 1.5 world units: median residual 0.00, with 98-100% of ALASKA's, CRAZY98's
+  and ROCKQRY's within a single unit, and every other factor off by a wide margin. Our vertical
+  records are pre-divided by 0.75, so 1.5 there is 2 world units per Evo foot here.
+*/
+function objectScale(terrain) { return terrain.trueScale ?? 2 / 3; }
+
 function firstStart(sit) { return sit.courses[0]?.segments[0]?.start ?? [4096, 0, 4096]; }
 function isCheckpoint(box) { return box.sourceClass === "CCheckpoint" || box.boxType === 6; }
 /*
@@ -271,6 +327,59 @@ function lowestCell(raw, x, z, reach) {
     lowest = Math.min(lowest, raw[clamp(cx + dx, 0, 255) + (clamp(cz + dz, 0, 255) << 8)]);
   }
   return lowest;
+}
+
+/*
+  The lowest ground the engine draws under a model's footprint: its own point and sixteen around
+  it at `radius` cells. A radius of zero is just the point.
+
+  The rim is where to look. Terrain is flat within a triangle, so the low point under a disk this
+  small - a few feet against a 32-foot cell - is on its edge unless a cell corner falls inside,
+  which a trunk almost never spans. Measured against a 449-point sampling of the same disks over
+  Baja Beach's 3,819 trees, that is exactly what the readings say: sixteen points around the rim
+  miss the true low by a median of 0.013 world units against 0.056 for eight, while adding
+  interior rings or the corners inside the disk changes the 99th percentile from 0.249 to 0.230,
+  which is to say nothing. The last tenths are covered by GROUND_MARGIN instead.
+*/
+function footprintGround(raw, gx, gz, radius) {
+  let lowest = drawnGround(raw, gx, gz);
+  if (!(radius > 0)) return lowest;
+  for (let step = 0; step < 16; step++) {
+    const angle = step * Math.PI / 8;
+    lowest = Math.min(lowest, drawnGround(raw, gx + radius * Math.cos(angle), gz + radius * Math.sin(angle)));
+  }
+  return lowest;
+}
+
+/*
+  The ground the engine actually draws, in RAW levels, at a point in the converted grid.
+
+  A model has to meet the surface MTM2 rasterises, not the height field it was fitted from.
+  Sampling the Evo source and rounding it to a level - what this used to do - is a different
+  surface: it interpolates at full precision and then rounds, while the engine interpolates
+  levels that were rounded first, and the two part company exactly where cells meet steeply.
+  Measured over Baja Beach's 3,819 trees, that left a quarter of them more than a unit above
+  the drawn surface and the worst 14.5 units up, which is the floating seen along hill edges.
+
+  ⚠ AND A CELL HAS TWO POSSIBLE SURFACES. It is drawn as four corners split into triangles,
+  and nothing in the files says which diagonal the engine picks; at a saddle the two readings
+  differ by up to 31 units. Taking the lower of them means a model can sit slightly into the
+  ground where the surface is ambiguous - median 0.79 units, 5.7 at the 95th percentile - but
+  never hangs above it, which is the trade worth making for a tree trunk.
+*/
+function drawnGround(raw, gx, gz) {
+  const x0 = Math.floor(gx), z0 = Math.floor(gz);
+  const fx = gx - x0, fz = gz - z0;
+  const at = (x, z) => raw[clamp(x, 0, 255) + (clamp(z, 0, 255) << 8)];
+  const corner00 = at(x0, z0), corner10 = at(x0 + 1, z0);
+  const corner01 = at(x0, z0 + 1), corner11 = at(x0 + 1, z0 + 1);
+  const acrossA = fx >= fz
+    ? corner00 + (corner10 - corner00) * fx + (corner11 - corner10) * fz
+    : corner00 + (corner11 - corner01) * fx + (corner01 - corner00) * fz;
+  const acrossB = fx + fz <= 1
+    ? corner00 + (corner10 - corner00) * fx + (corner01 - corner00) * fz
+    : corner11 + (corner01 - corner11) * (1 - fx) + (corner10 - corner11) * (1 - fz);
+  return Math.min(acrossA, acrossB);
 }
 
 function sampleTerrain(data, x, z) {

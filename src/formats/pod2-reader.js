@@ -44,10 +44,79 @@ export async function readPod2(file) {
   }
   const commentEnd = header.subarray(8, 88).indexOf(0);
   const commentBytes = header.subarray(8, commentEnd < 0 ? 88 : 8 + commentEnd);
-  const archive = { format: "POD2", file, comment: decoder.decode(commentBytes).trim(), entries };
-  archive.byPath = new Map(entries.map(entry => [entry.normalizedName, entry]));
+  return indexArchive({ format: "POD2", file, comment: decoder.decode(commentBytes).trim(), entries });
+}
+
+/*
+  Either container an Evo track can arrive in.
+
+  The stock games ship POD2, but tracks have been repacked as POD1 for years - several of
+  OOPS's Evo 2 releases are POD1 - and the container says nothing about what is inside it. The
+  situation file is what does, so the archive is opened however it is packed and the caller
+  looks for an Evo .SIT in it (see locateEvoTrack in track-converter.js).
+
+  POD2 announces itself with a signature. POD1 has none, so its directory is validated
+  instead: the classic 32-byte name field first, then Community Patch 3's widened 64-byte
+  one - the same order and the same checks as JSTrackViewer's pod-format.js.
+*/
+export async function readPod(file) {
+  if (!(file instanceof Blob) || file.size < 4) throw new Error("Input is too small to be a POD archive.");
+  const signature = new TextDecoder("latin1").decode(new Uint8Array(await file.slice(0, 4).arrayBuffer()));
+  return signature === "POD2" ? readPod2(file) : readPod1(file);
+}
+
+const POD1_HEADER_SIZE = 84;
+const POD1_MAX_ENTRIES = 8192;
+const POD1_LAYOUTS = [
+  { format: "POD1", nameBytes: 32, recordBytes: 40 },
+  { format: "Extended POD1", nameBytes: 64, recordBytes: 72 },
+];
+
+async function readPod1(file) {
+  if (file.size < POD1_HEADER_SIZE) throw new Error("Input is too small to be a POD archive.");
+  const header = new Uint8Array(await file.slice(0, POD1_HEADER_SIZE).arrayBuffer());
+  const count = new DataView(header.buffer).getUint32(0, true);
+  if (count < 1 || count > POD1_MAX_ENTRIES) throw new Error("Input is neither a POD2 archive nor a plausible POD1 directory.");
+  const decoder = new TextDecoder("latin1");
+  const commentEnd = header.subarray(4, 84).indexOf(0);
+  const comment = decoder.decode(header.subarray(4, commentEnd < 0 ? 84 : 4 + commentEnd)).trim();
+  for (const layout of POD1_LAYOUTS) {
+    const entries = await readPod1Directory(file, count, layout, decoder);
+    if (entries) return indexArchive({ format: layout.format, file, comment, entries });
+  }
+  throw new Error("Input is neither a POD2 archive nor a valid POD1 directory (32- or 64-byte names).");
+}
+
+// Null when the directory does not fit this layout, so the caller can try the next one.
+async function readPod1Directory(file, count, { nameBytes, recordBytes }, decoder) {
+  const tableEnd = POD1_HEADER_SIZE + count * recordBytes;
+  if (tableEnd > file.size) return null;
+  const table = new Uint8Array(await file.slice(POD1_HEADER_SIZE, tableEnd).arrayBuffer());
+  const view = new DataView(table.buffer);
+  const entries = [], seen = new Set();
+  for (let i = 0; i < count; i++) {
+    const at = i * recordBytes;
+    let end = at;
+    while (end < at + nameBytes && table[end] !== 0) end++;
+    if (end === at + nameBytes) return null;
+    const name = decoder.decode(table.subarray(at, end)).trim();
+    const length = view.getUint32(at + nameBytes, true);
+    const offset = view.getUint32(at + nameBytes + 4, true);
+    if (!name || /[\0-\x1f:]/.test(name) || offset > file.size || length > file.size - offset) return null;
+    const normalizedName = normalizePath(name);
+    // The engine serves the first copy of a name it meets, so a repeated entry is ignored
+    // rather than rejected; a POD2 duplicate is still an error, since no packer writes one.
+    if (seen.has(normalizedName)) continue;
+    seen.add(normalizedName);
+    entries.push({ name, normalizedName, title: title(name), offset, length });
+  }
+  return entries;
+}
+
+function indexArchive(archive) {
+  archive.byPath = new Map(archive.entries.map(entry => [entry.normalizedName, entry]));
   archive.byTitle = new Map();
-  for (const entry of entries) if (!archive.byTitle.has(entry.title)) archive.byTitle.set(entry.title, entry);
+  for (const entry of archive.entries) if (!archive.byTitle.has(entry.title)) archive.byTitle.set(entry.title, entry);
   return archive;
 }
 

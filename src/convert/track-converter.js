@@ -1,6 +1,6 @@
-import { readPod2, readEntry, resolveEntry } from "../formats/pod2-reader.js";
+import { readPod, readEntry, resolveEntry } from "../formats/pod2-reader.js";
 import { writePod1, validatePod1 } from "../formats/pod1-writer.js";
-import { parseEvoSit } from "../formats/evo/evo-sit-parser.js";
+import { parseEvoSit, isEvoSit } from "../formats/evo/evo-sit-parser.js";
 import { parseEvoLvl } from "../formats/evo/evo-lvl-parser.js";
 import { parseEvoTex } from "../formats/evo/evo-tex-parser.js";
 import { parseEvoVeg } from "../formats/evo/veg-parser.js";
@@ -9,7 +9,7 @@ import { decodeEvoImage } from "../formats/evo/evo-image.js";
 import { replaceExtension, safeStem, stem, title } from "../shared/paths.js";
 import { convertTerrain, convertClr } from "./terrain.js";
 import { encodePng } from "./png.js";
-import { writeMtmBin } from "./bin-writer.js";
+import { writeMtmBin, alphaProfile } from "./bin-writer.js";
 import { terrainBmp } from "./bmp.js";
 import { createMtmPalette, makeFogMap, sampleForPalette } from "./palette.js";
 import { quantizeToRawAct } from "./raw-act.js";
@@ -29,7 +29,24 @@ const DEFAULT_OPTIONS = {
   rawFallback: false,
   vegetationNonCollide: true,
   allObjectsNonCollide: false,
+  // Multiplies the automatic terrain fit; see convertTerrain for what happens above 1.
+  heightFactor: 1,
+  // Empty means derived from the .SIT name; see trackStem.
+  stem: "",
 };
+
+/*
+  The file stems of MTM2's own tracks, from the LEVELS\<stem>.LVL of every stock pod.
+
+  The engine serves the first mounted copy of every file name, and the stock pods mount first.
+  A converted track that reuses one of these stems therefore loads the stock track's terrain,
+  tile grid, lighting, level file and palette underneath its own objects: Snake River Canyon,
+  converted from SNAKE.POD, did exactly that - nineteen of its own files never loaded.
+*/
+const STOCK_MTM2_STEMS = new Set([
+  "ALASKA", "AUSSIE", "AZTEC", "BAJA", "CRAZY98", "GRAVEY", "JUNK", "MAIN",
+  "ROCKQRY", "SNAKE", "SUMMIT1", "SUMMIT2", "SUMMIT3", "TPARK", "WAR",
+]);
 
 export async function convertTrack(file, report = () => {}, requested = {}) {
   const options = { ...DEFAULT_OPTIONS, ...requested };
@@ -77,13 +94,11 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
   const artLabel = options.hdArt ? (options.rawFallback ? "HD PNG + legacy RAW/ACT" : "HD PNG only") : "legacy RAW/ACT only";
   emit(`CONVERTER BUILD ${BUILD_ID}`, 0, "success");
   emit(`Options: art = ${artLabel}; vegetation ${options.vegetationNonCollide ? "non-collide" : "solid"}; ${options.allObjectsNonCollide ? "all scenery non-collide" : "scenery solid"}.`, 1);
-  emit(`Opening ${file.name || "POD2 archive"}...`, 2);
-  const pod = await readPod2(file);
-  emit(`POD2 directory: ${pod.entries.length} entries.`, 7);
-  const sitEntry = pod.entries.find(entry => entry.title.endsWith(".SIT"));
-  if (!sitEntry) throw new Error("No .SIT track file was found in this POD2 archive.");
+  emit(`Opening ${file.name || "POD archive"}...`, 2);
+  const pod = await readPod(file);
+  emit(`${pod.format} directory: ${pod.entries.length} entries.`, 7);
+  const { entry: sitEntry } = await locateEvoTrack(pod);
   const sit = parseEvoSit(await readEntry(pod, sitEntry), sitEntry.name);
-  if (![6, 7].includes(sit.version)) warnings.push(`SIT version ${sit.version} is treated as Evo ${sit.game}.`);
   emit(`Detected 4x4 Evolution ${sit.game}, SIT v${sit.version}: ${sit.trackName || sitEntry.title}`, 11);
   const lvlEntry = mustResolve(pod, sit.lvlName, "LEVELS", ".LVL");
   const lvl = parseEvoLvl(await readEntry(pod, lvlEntry), lvlEntry.name);
@@ -97,13 +112,19 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
   const heightEntry = mustResolve(pod, lvl.heightName, "DATA", ".RAW");
   const clrEntry = mustResolve(pod, lvl.clrName, "DATA", ".CLR");
   const heightBytes = await readEntry(pod, heightEntry);
-  const terrain = convertTerrain(heightBytes, sit.courses);
+  const terrain = convertTerrain(heightBytes, sit.courses, options.heightFactor);
   const clr = convertClr(await readEntry(pod, clrEntry));
   const sourceRange = terrain.max - terrain.min;
-  warnings.push(`Terrain altitude ${terrain.min.toFixed(1)}..${terrain.max.toFixed(1)} ft was linearly fitted to MTM2's 8-bit height field at ${terrain.scale.toFixed(4)} RAW levels per Evo foot.`);
-  emit(`Terrain range ${terrain.min.toFixed(1)}..${terrain.max.toFixed(1)} ft (${sourceRange.toFixed(1)} ft span); linear MTM2 scale ${terrain.scale.toFixed(4)}.`, 21);
+  const slopePercent = Math.round(100 * terrain.scale / terrain.trueScale);
+  warnings.push(`Terrain altitude ${terrain.min.toFixed(1)}..${terrain.max.toFixed(1)} ft was linearly fitted to MTM2's 8-bit height field at ${terrain.scale.toFixed(4)} RAW levels per Evo foot: ${slopePercent}% of the source's true slope (automatic fit ${terrain.autoScale.toFixed(4)} x height factor ${terrain.factor.toFixed(2)}).`);
+  emit(`Terrain range ${terrain.min.toFixed(1)}..${terrain.max.toFixed(1)} ft (${sourceRange.toFixed(1)} ft span); MTM2 scale ${terrain.scale.toFixed(4)}, ${slopePercent}% of true slope.`, 21);
+  if (terrain.clamped.low || terrain.clamped.high) {
+    const span = 255 / terrain.scale, share = (100 * (terrain.clamped.low + terrain.clamped.high) / 65536).toFixed(1);
+    warnings.push(`TERRAIN HEIGHT: at ${terrain.factor.toFixed(2)}x the height field holds ${span.toFixed(0)} ft, less than the track's ${sourceRange.toFixed(0)} ft, so a window of ${terrain.base.toFixed(0)}..${(terrain.base + span).toFixed(0)} ft centred on the racing line was kept: ${terrain.clamped.low} cells were clamped flat at its floor and ${terrain.clamped.high} at its ceiling (${share}% of the map).`);
+  }
+  if (terrain.courseClamped) warnings.push("TERRAIN HEIGHT: the racing line itself climbs further than this height factor can hold, so its highest or lowest stretch is clamped flat. Lower the factor.");
 
-  const prefix = safeStem(sitEntry.title).slice(0, 8);
+  const prefix = trackStem(sitEntry, sit, options, warnings);
   warnings.push("LIGHTING: the LVL keeps stock TPARK's five values (sun vector 46333,-46333,0; shade scalar 40960; sun position 32000,-46333,0; intensity 64000; final value 255) and DATA LTE is rebuilt from the converted terrain over MTM2's stock 160..255 range, with the east/west slope term added rather than subtracted so the lit hemisphere agrees with that sun vector.");
   warnings.push("PALETTE: ART\\<track>.ACT is median-cut from this track's converted art, paired with a matching FOG\\<track>.MAP. Only DX11/Vulkan draw the PNGs at full depth; the software and DX9 renderers quantise them into this palette, so it is what those renderers show.");
   warnings.push(`TEXTURE LOOKUP: TEX and BIN records name same-stem .RAW files following Traxx conventions. This POD packs ${artLabel}, so the situation file is .${legacyFallback ? "SIT" : "SI2"} and TXV declares legacyFallback=${legacyFallback ? 1 : 0}.` + (legacyFallback ? "" : " An unmodified 1998 install scans only for .SIT and will not list this track; enable the RAW/ACT fallback if you need it to."));
@@ -172,7 +193,7 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
   }
 
   const extraTextureNames = [...new Set(models.flatMap(item => item.model.meshes.map(mesh => mesh.textureName).filter(Boolean)).map(title))];
-  const transparentTextures = new Set();
+  const transparentTextures = new Set(), alphaModes = new Map();
   for (const sourceName of extraTextureNames) if (!textureMap.has(sourceName)) textureMap.set(sourceName, allocateName(sourceName, new Set(textureMap.values()), 18));
   emit(`Converting ${extraTextureNames.length} model texture references...`, 72);
   for (let i = 0; i < extraTextureNames.length; i++) {
@@ -188,7 +209,11 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
       emit(`TEXTURE NOT CONVERTED ${sourceName} -> ART\\${outputStem} placeholder`, 72 + 7 * i / Math.max(1, extraTextureNames.length), "warning");
       continue;
     }
-    if (decoded.hasAlpha) transparentTextures.add(sourceName.toUpperCase());
+    const alpha = alphaProfile(decoded.rgba);
+    if (alpha) {
+      transparentTextures.add(sourceName.toUpperCase());
+      alphaModes.set(sourceName.toUpperCase(), alpha);
+    }
     sampleForPalette(paletteHistogram, decoded.rgba);
     await addTexture(outputStem, decoded, `model texture ${decoded.sourcePath || sourceName} -> ART\\${outputStem}`);
     hasLargeHdTexture ||= decoded.width > 256 || decoded.height > 256;
@@ -208,7 +233,8 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
     if (!options.hdArt) { emit(`NORMAL MAP SKIPPED ${bumpName}: HD art is off, and a normal map has no legacy form`, 79, "detail"); continue; }
     if (decoded) {
       const normalName = `ART\\${baseStem}_N.PNG`;
-      addHd(normalName, await encodePng(decoded.width, decoded.height, decoded.rgba), `normal map ${decoded.sourcePath || bumpName} -> ${normalName}`);
+      const flat = opaqueNormalMap(decoded);
+      addHd(normalName, await encodePng(flat.width, flat.height, flat.rgba), `normal map ${decoded.sourcePath || bumpName} -> ${normalName}`);
       hasLargeHdTexture ||= decoded.width > 256 || decoded.height > 256;
       emit(`NORMAL MAP CONVERTED ${decoded.sourcePath || bumpName} -> ${normalName}`, 79, "detail");
     } else emit(`NORMAL MAP NOT CONVERTED ${bumpName}: source missing or unreadable`, 79, "warning");
@@ -219,11 +245,15 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
     emit("TEXTURE GENERATED <unnamed SMF material> -> ART\\DEFAULT placeholder", 79, "warning");
   }
 
-  emit(`Writing ${models.length} CP3 HD BIN models...`, 80);
+  emit(`Writing ${models.length} CP3 HD BIN models (instanceable scenery faces)...`, 80);
   const successfulModels = new Map();
+  const vegetationModels = new Set(vegModelNames);
   for (const { sourceName, sourcePath, model } of models) {
     const outputName = `${modelNames.get(title(sourceName))}.BIN`;
-    const bin = writeMtmBin(model, name => `${textureMap.get(title(name)) || "DEFAULT"}.RAW`, { transparentTextures });
+    const bin = writeMtmBin(model, name => `${textureMap.get(title(name)) || "DEFAULT"}.RAW`, {
+      transparentTextures, alphaModes, faces: "scenery", foliage: vegetationModels.has(title(sourceName)),
+      bumpMaps: options.hdArt,
+    });
     addCommon(`MODELS\\${outputName}`, bin, `model ${sourcePath || sourceName} -> MODELS\\${outputName}`);
     emit(`MODEL CONVERTED ${sourcePath || sourceName} -> MODELS\\${outputName} (${model.meshes.length} meshes)`, 80, "detail");
     successfulModels.set(sourceName.toUpperCase(), outputName); successfulModels.set(title(sourceName), outputName);
@@ -231,26 +261,31 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
 
   const vegetationPlacements = [];
   if (vegetation?.trees.length) {
+    /*
+      Trees go in at the size their model was authored, which is the size Evo draws up close.
+
+      treeSizeX, treeSizeY and treeBiasY are not a model scale. They size the distant billboard:
+      every .VEG names a treeTex that is a sheet of tree sprites (SKULLSET0.TIF, DESERTSET0.TIF,
+      ...), the bias is always negative - a sprite sunk into the ground - and against the models
+      they bear no consistent relation. Across the five stock Evo 2 tracks treeSizeY / height
+      runs from 0.22 to 2.13, and TRIBAJA gives DESERT115 80 ft in one slot and 25 ft in
+      another. Scaling the models to them made Snake River's trees 0.35 of their size, Deja
+      Voodoo's 3.2 times and Terramar's 1.6 times - small, gigantic and large, which is what
+      players reported.
+
+      With no per-slot size to bake in, a tree is simply its converted model. That retires the
+      V_ copies, and with them a cross-track collision: Snake River and Terramar each shipped a
+      different V_DESERT115.BIN, and the engine serves only the first one it mounts.
+    */
     const modelsByName = new Map(models.map(item => [title(item.sourceName), item.model]));
-    const usedNames = new Set(modelNames.values());
-    const variants = [];
-    for (let slot = 0; slot < vegetation.treeModels.length; slot++) {
-      const sourceName = title(vegetation.treeModels[slot]);
-      const model = modelsByName.get(sourceName);
-      const extent = model && modelExtent(model);
-      if (!model || !extent) { warnings.push(`Vegetation slot ${slot + 1} (${sourceName}) has no usable geometry and was omitted.`); variants.push(null); continue; }
-      const size = vegetation.treeSizes[slot];
-      const scaleY = size ? size.sizeY / extent.height : 1;
-      const scaleXZ = size ? size.sizeX / extent.width : scaleY;
-      const outputStem = allocateName(`V_${stem(sourceName)}`, usedNames, 20, "TREE");
-      const outputName = `${outputStem}.BIN`;
-      const variantBin = writeMtmBin(model, name => `${textureMap.get(title(name)) || "DEFAULT"}.RAW`, {
-        scale: [scaleXZ, scaleY, scaleXZ], transparentTextures,
-      });
-      addCommon(`MODELS\\${outputName}`, variantBin, `vegetation variant ${sourceName} -> MODELS\\${outputName}; scale ${scaleXZ.toFixed(4)},${scaleY.toFixed(4)},${scaleXZ.toFixed(4)}`);
-      emit(`MODEL CONVERTED [vegetation] ${sourceName} -> MODELS\\${outputName} (pre-scaled, no-collide placements)`, 82, "detail");
-      variants.push({ modelName: outputName, clearance: -extent.lowY * scaleY });
-    }
+    const variants = vegetation.treeModels.map((name, slot) => {
+      const sourceName = title(name), modelName = successfulModels.get(sourceName);
+      const extent = modelsByName.has(sourceName) ? modelExtent(modelsByName.get(sourceName)) : null;
+      if (!modelName || !extent) { warnings.push(`Vegetation slot ${slot + 1} (${sourceName}) has no usable geometry and was omitted.`); return null; }
+      const billboard = vegetation.treeSizes[slot];
+      emit(`VEGETATION slot ${slot + 1}: MODELS\\${modelName} at its authored ${extent.height.toFixed(1)} ft${billboard ? ` (the .VEG's ${billboard.sizeX} x ${billboard.sizeY} ft is its distant billboard)` : ""}`, 82, "detail");
+      return { modelName, clearance: -extent.lowY, footprint: extent.footprint };
+    });
     const ordinaryCount = sit.boxes.filter(box => (box.modelName && successfulModels.has(title(box.modelName))) || isCheckpoint(box)).length;
     const capacity = Math.max(0, 4096 - ordinaryCount);
     const candidates = vegetation.trees.filter(tree => variants[(tree.value & 3) % Math.max(1, variants.length)]);
@@ -291,7 +326,7 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
   const validation = await validatePod1(blob);
   emit(`Validated POD1 directory: ${validation.count} files, ${(blob.size / 1048576).toFixed(1)} MiB.`, 99);
   emit(`Conversion complete. The ${track.situation}-based POD1 track is ready to download.`, 100, "success");
-  const commonStats = { game: sit.game, textures: convertedTextures, models: models.length + (vegetationPlacements.length ? vegetation.treeModels.length : 0), boxes: sit.boxes.length, vegetation: vegetationPlacements.length };
+  const commonStats = { game: sit.game, textures: convertedTextures, models: models.length, boxes: sit.boxes.length, vegetation: vegetationPlacements.length, stem: prefix };
   return { blob, filename: `${prefix}_MTM2${options.hdArt ? "_HD" : ""}.POD`, format: "POD1", buildId: BUILD_ID, warnings, options,
     stats: { ...commonStats, files: validation.count, hasLargeHdTexture, art: artLabel, situation: track.situation } };
 
@@ -303,6 +338,64 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
   }
 }
 
+/*
+  A normal map carries vectors, not coverage. Evo 2's bump TIFFs do have a fourth sample, but
+  it is not opacity - it averages 60 and never exceeds 128 across TrailBlazer_bump.TIF - so it
+  is flattened before the PNG is written rather than becoming a semi-transparent normal map.
+*/
+function opaqueNormalMap(decoded) {
+  const rgba = new Uint8Array(decoded.rgba);
+  for (let i = 3; i < rgba.length; i += 4) rgba[i] = 255;
+  return { ...decoded, rgba, hasAlpha: false };
+}
+
+/*
+  The Evo situation file an archive holds, found by what it is rather than where it sits.
+
+  Neither container nor name says an archive is an Evo track: POD1 repacks exist, and an MTM2
+  track's .SIT has the same extension. The header does - an Evo .SIT opens with the word
+  "version" and a number, 6 for Evo 1 and 7 for Evo 2 - so every .SIT is read that far and the
+  first Evo one wins. Only the first 64 bytes are read per candidate.
+*/
+export async function locateEvoTrack(pod) {
+  const found = [];
+  for (const entry of pod.entries) {
+    if (!entry.title.endsWith(".SIT")) continue;
+    const head = new Uint8Array(await pod.file.slice(entry.offset, entry.offset + Math.min(entry.length, 64)).arrayBuffer());
+    const version = isEvoSit(head)
+      ? Number.parseInt(new TextDecoder("latin1").decode(head).split(/\r?\n/)[1], 10)
+      : null;
+    if (version === 6 || version === 7) return { entry, version };
+    found.push(version ? `${entry.name} (Evo .SIT v${version})` : `${entry.name} (not an Evo .SIT)`);
+  }
+  throw new Error(found.length
+    ? `No Evo 1 or Evo 2 track (.SIT v6 or v7) in this ${pod.format} archive. Situation files found: ${found.join(", ")}.`
+    : `No .SIT situation file in this ${pod.format} archive, so it holds no Evo track.`);
+}
+
+/*
+  The stem every track file inside the pod is named from: DATA\<stem>.*, LEVELS\<stem>.LVL,
+  FOG\<stem>.MAP, ART\<stem>.ACT and WORLD\<stem>.SIT/.SI2.
+
+  An author's choice is taken as given, provided it is one the engine can use and not a stock
+  track's. Otherwise it comes from the .SIT name, moved aside with the Evo generation when that
+  lands on a stock stem - SNAKE becomes SNAKEE2 - so the converted track's files are the ones
+  that load.
+*/
+function trackStem(sitEntry, sit, options, warnings) {
+  const requested = String(options.stem ?? "").trim().toUpperCase();
+  if (requested) {
+    if (!/^[A-Z0-9_]{1,8}$/.test(requested)) throw new Error(`Track file stem "${options.stem}" must be 1 to 8 letters, digits or underscores.`);
+    if (STOCK_MTM2_STEMS.has(requested)) throw new Error(`Track file stem ${requested} belongs to a stock MTM2 track, whose files would load in place of this one's.`);
+    return requested;
+  }
+  const natural = safeStem(sitEntry.title).slice(0, 8);
+  if (!STOCK_MTM2_STEMS.has(natural)) return natural;
+  const renamed = `${natural.slice(0, 6)}E${sit.game}`;
+  warnings.push(`FILE STEM: ${natural} is a stock MTM2 track's stem. Its files mount first and would load in place of this track's terrain, lighting and level, so the converted files are named ${renamed}.`);
+  return renamed;
+}
+
 function modelExtent(model) {
   let lowX = Infinity, highX = -Infinity, lowY = Infinity, highY = -Infinity;
   const preferred = model.meshes.filter(mesh => mesh.visible && !mesh.lod && mesh.indices.length);
@@ -310,7 +403,20 @@ function modelExtent(model) {
     lowX = Math.min(lowX, mesh.positions[i]); highX = Math.max(highX, mesh.positions[i]);
     lowY = Math.min(lowY, mesh.positions[i + 1]); highY = Math.max(highY, mesh.positions[i + 1]);
   }
-  return highY > lowY && highX > lowX ? { lowY, height: highY - lowY, width: highX - lowX } : null;
+  if (!(highY > lowY && highX > lowX)) return null;
+  /*
+    How far the model reaches sideways where it meets the ground: the trunk, not the canopy.
+    A placement grounds the model at one point, so on a slope everything within this radius of
+    that point is what decides whether the base hangs in the air. Measured over the bottom
+    twentieth of the model's height, which is trunk on every stock Evo tree and is empty on
+    nothing that gets placed.
+  */
+  let footprint = 0;
+  for (const mesh of preferred) for (let i = 0; i < mesh.positions.length; i += 3) {
+    if (mesh.positions[i + 1] - lowY >= 0.05 * (highY - lowY)) continue;
+    footprint = Math.max(footprint, Math.hypot(mesh.positions[i], mesh.positions[i + 2]));
+  }
+  return { lowY, height: highY - lowY, width: highX - lowX, footprint };
 }
 
 function evenlyThin(values, limit) {

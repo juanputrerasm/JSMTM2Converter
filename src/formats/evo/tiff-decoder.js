@@ -1,15 +1,19 @@
 /*
-  Minimal TIFF reader for Evo 2 track art.
+  Minimal TIFF reader for Evo 2 art.
 
-  Browsers do not decode TIFF, and the viewer's PNG/TGA path cannot help because these files
+  Browsers do not decode TIFF, and the PNG/TGA path cannot help because most of these files
   are palette-indexed rather than true colour. Only the forms the game actually ships are
-  supported, verified across the .TIF entries of BAJBEACH and PEAK:
+  supported, verified across the .TIF entries of BAJBEACH and PEAK and all 641 in the Evo 2
+  TRUCK.POD:
 
     - little-endian ("II", magic 42), uncompressed (Compression 1)
-    - PhotometricInterpretation 3 (palette colour) with a ColorMap
     - PlanarConfiguration 1 (chunky), or absent, which means 1
-    - SamplesPerPixel 1  -> index only, fully opaque
-    - SamplesPerPixel 2  -> index plus a second 8-bit sample used as opacity
+    - PhotometricInterpretation 3 (palette colour) with a ColorMap, 1 or 2 samples per pixel:
+      the diffuse art. The second sample is opacity.
+    - PhotometricInterpretation 2 (RGB) with 3 or 4 samples per pixel: the "_BUMP" normal
+      maps Evo 2 vehicles carry, which have no palette at all. Sampled across
+      TrailBlazer_bump.TIF, R and G average 128 and B averages 253 - tangent space, as a
+      normal map should be.
     - 64, 128, 256 or 512 square, single strip
 
   Anything else is refused with a reason rather than decoded into plausible-looking garbage:
@@ -42,6 +46,7 @@ const TAG = {
 const TYPE_SIZE = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8 };
 
 const COMPRESSION_NONE = 1;
+const PHOTOMETRIC_RGB = 2;
 const PHOTOMETRIC_PALETTE = 3;
 const PLANAR_CHUNKY = 1;
 
@@ -72,13 +77,15 @@ export function decodeTiffTexture(bytes, textureName) {
 
   if (!width || !height) throw new Error(`${textureName}: TIFF has no dimensions`);
   if (compression !== COMPRESSION_NONE) throw new Error(`${textureName}: unsupported TIFF compression ${compression}`);
-  if (photometric !== PHOTOMETRIC_PALETTE) throw new Error(`${textureName}: unsupported TIFF photometric ${photometric} (only palette colour is handled)`);
+  if (photometric !== PHOTOMETRIC_PALETTE && photometric !== PHOTOMETRIC_RGB) throw new Error(`${textureName}: unsupported TIFF photometric ${photometric} (only palette colour and RGB are handled)`);
   if (planar !== PLANAR_CHUNKY) throw new Error(`${textureName}: unsupported TIFF planar configuration ${planar}`);
-  if (samplesPerPixel !== 1 && samplesPerPixel !== 2) throw new Error(`${textureName}: unsupported TIFF samples/pixel ${samplesPerPixel}`);
+  const paletted = photometric === PHOTOMETRIC_PALETTE;
+  if (paletted && samplesPerPixel !== 1 && samplesPerPixel !== 2) throw new Error(`${textureName}: unsupported TIFF samples/pixel ${samplesPerPixel} for a palette image`);
+  if (!paletted && samplesPerPixel !== 3 && samplesPerPixel !== 4) throw new Error(`${textureName}: unsupported TIFF samples/pixel ${samplesPerPixel} for an RGB image`);
   if (bits.some((b) => b !== 8)) throw new Error(`${textureName}: unsupported TIFF bit depth ${bits.join("/")}`);
 
-  const colorMap = tags.get(TAG.COLOR_MAP)?.values;
-  if (!colorMap || colorMap.length < 768) throw new Error(`${textureName}: TIFF palette image has no usable ColorMap`);
+  const colorMap = paletted ? tags.get(TAG.COLOR_MAP)?.values : null;
+  if (paletted && (!colorMap || colorMap.length < 768)) throw new Error(`${textureName}: TIFF palette image has no usable ColorMap`);
 
   const stripOffsets = tags.get(TAG.STRIP_OFFSETS)?.values ?? [];
   const stripCounts = tags.get(TAG.STRIP_BYTE_COUNTS)?.values ?? [];
@@ -90,13 +97,16 @@ export function decodeTiffTexture(bytes, textureName) {
     are nominally 0..65535, but some writers store 0..255 in the low byte; if nothing in the
     map exceeds 255 it is read as already-8-bit rather than crushed to near-black.
   */
-  const entries = colorMap.length / 3;
-  const sixteenBit = colorMap.some((value) => value > 255);
-  const palette = new Uint8Array(entries * 3);
-  for (let i = 0; i < entries; i++) {
-    palette[i * 3 + 0] = sixteenBit ? colorMap[i] >> 8 : colorMap[i];
-    palette[i * 3 + 1] = sixteenBit ? colorMap[entries + i] >> 8 : colorMap[entries + i];
-    palette[i * 3 + 2] = sixteenBit ? colorMap[entries * 2 + i] >> 8 : colorMap[entries * 2 + i];
+  let entries = 0, palette = null;
+  if (paletted) {
+    entries = colorMap.length / 3;
+    const sixteenBit = colorMap.some((value) => value > 255);
+    palette = new Uint8Array(entries * 3);
+    for (let i = 0; i < entries; i++) {
+      palette[i * 3 + 0] = sixteenBit ? colorMap[i] >> 8 : colorMap[i];
+      palette[i * 3 + 1] = sixteenBit ? colorMap[entries + i] >> 8 : colorMap[entries + i];
+      palette[i * 3 + 2] = sixteenBit ? colorMap[entries * 2 + i] >> 8 : colorMap[entries * 2 + i];
+    }
   }
 
   const rgba = new Uint8ClampedArray(width * height * 4);
@@ -113,19 +123,25 @@ export function decodeTiffTexture(bytes, textureName) {
       const src = offset + r * rowBytes;
       if (src + rowBytes > bytes.length) throw new Error(`${textureName}: truncated TIFF strip ${strip}`);
       for (let x = 0; x < width; x++) {
-        const index = bytes[src + x * samplesPerPixel];
-        const alpha = samplesPerPixel === 2 ? bytes[src + x * samplesPerPixel + 1] : 255;
+        const sample = src + x * samplesPerPixel;
         const out = (row * width + x) * 4;
-        const entry = Math.min(index, entries - 1) * 3;
-        rgba[out + 0] = palette[entry + 0];
-        rgba[out + 1] = palette[entry + 1];
-        rgba[out + 2] = palette[entry + 2];
-        rgba[out + 3] = alpha;
+        if (paletted) {
+          const entry = Math.min(bytes[sample], entries - 1) * 3;
+          rgba[out + 0] = palette[entry + 0];
+          rgba[out + 1] = palette[entry + 1];
+          rgba[out + 2] = palette[entry + 2];
+          rgba[out + 3] = samplesPerPixel === 2 ? bytes[sample + 1] : 255;
+        } else {
+          rgba[out + 0] = bytes[sample];
+          rgba[out + 1] = bytes[sample + 1];
+          rgba[out + 2] = bytes[sample + 2];
+          rgba[out + 3] = samplesPerPixel === 4 ? bytes[sample + 3] : 255;
+        }
       }
     }
   }
 
-  return { name: textureName, width, height, rgba, hasAlpha: samplesPerPixel === 2 };
+  return { name: textureName, width, height, rgba, hasAlpha: samplesPerPixel === 2 || samplesPerPixel === 4 };
 }
 
 function readIfd(view, bytes, offset, littleEndian, textureName) {

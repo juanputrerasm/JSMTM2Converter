@@ -1,4 +1,7 @@
 *, *::before, *::after { box-sizing: border-box; }
+/* The page shows and hides whole groups with the hidden attribute, and several of them set their
+   own display (flex, grid), which would otherwise win over the browser's [hidden] rule. */
+[hidden] { display:none !important; }
 :root { --bg:#1a1a1e; --surface:#25252b; --surface2:#2e2e36; --border:#3a3a46; --text:#e0e0e8; --dim:#888898; --accent:#5d9cf5; --accent2:#3a6bbf; --danger:#e05555; --green:#55c070; --font:'Segoe UI',system-ui,sans-serif; --mono:'Consolas','Fira Code',monospace; }
 html, body { min-height:100%; margin:0; }
 body { background:var(--bg); color:var(--text); font:13px var(--font); }
@@ -22,9 +25,19 @@ button:hover:not(:disabled) { background:var(--border); } button:disabled { opac
 .options em { display:block; color:var(--dim); font-size:11px; font-style:normal; margin-top:2px; }
 .options code { font:11px var(--mono); color:var(--accent); }
 .options label.disabled { opacity:.5; cursor:default; }
+/* Numeric and text options: the control sits beside its description, as a checkbox does. */
+.options label.field input { width:4.6rem; padding:3px 6px; border:1px solid var(--border); border-radius:4px; background:#17171b; color:var(--text); font:12px var(--mono); }
+.options label.field input:invalid { border-color:var(--danger); }
 .terminal-title { display:flex; justify-content:space-between; align-items:center; }.terminal-title h2 { margin:0 0 8px; } #progress-percent { color:var(--dim); font:11px var(--mono); }
 .progress-track { height:5px; background:#17171b; overflow:hidden; border-radius:3px; margin-bottom:10px; } #progress-bar { width:0; height:100%; background:var(--accent); transition:width .15s linear; }
 .terminal { min-height:400px; max-height:60vh; overflow:auto; padding:12px; background:#111114; border:1px solid #303038; color:#c8c8d0; font:12px/1.55 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere; }
 .line.detail { color:#737382; }.line.warning { color:#e2bb61; }.line.error { color:var(--danger); }.line.success { color:var(--green); }
 .note { color:var(--dim); font-size:11px; line-height:1.5; padding:0 4px; }
 @media (max-width:600px) { .topbar { align-items:flex-start; flex-direction:column; }.badge { margin:0; }.drop-zone { flex-direction:column; }.terminal { min-height:330px; } }
+
+/* Vehicle picker: the first row of the options for a vehicle archive, in the same type as the
+   option titles beside it rather than a small-caps label of its own. */
+.options .truck-picker { grid-column:1 / -1; display:flex; align-items:center; gap:8px; }
+.options .truck-picker label { display:block; flex:none; font-weight:600; font-size:12px; color:var(--text); cursor:default; }
+.options .truck-picker select { flex:1; min-width:0; padding:4px 6px; border:1px solid var(--border); border-radius:4px; background:#17171b; color:var(--text); font:12px var(--font); }
+.options .truck-picker select:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
