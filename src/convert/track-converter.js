@@ -29,6 +29,8 @@ const DEFAULT_OPTIONS = {
   rawFallback: false,
   vegetationNonCollide: true,
   allObjectsNonCollide: false,
+  // Anchor a model where its own underside meets the terrain; see restingPoint in track-writer.js.
+  seatOnTerrain: true,
   // Multiplies the automatic terrain fit; see convertTerrain for what happens above 1.
   heightFactor: 1,
   // Empty means derived from the .SIT name; see trackStem.
@@ -93,7 +95,7 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
   };
   const artLabel = options.hdArt ? (options.rawFallback ? "HD PNG + legacy RAW/ACT" : "HD PNG only") : "legacy RAW/ACT only";
   emit(`CONVERTER BUILD ${BUILD_ID}`, 0, "success");
-  emit(`Options: art = ${artLabel}; vegetation ${options.vegetationNonCollide ? "non-collide" : "solid"}; ${options.allObjectsNonCollide ? "all scenery non-collide" : "scenery solid"}.`, 1);
+  emit(`Options: art = ${artLabel}; vegetation ${options.vegetationNonCollide ? "non-collide" : "solid"}; ${options.allObjectsNonCollide ? "all scenery non-collide" : "scenery solid"}; models seated ${options.seatOnTerrain ? "where they rest" : "on the ground under their centre"}.`, 1);
   emit(`Opening ${file.name || "POD archive"}...`, 2);
   const pod = await readPod(file);
   emit(`${pod.format} directory: ${pod.entries.length} entries.`, 7);
@@ -304,7 +306,7 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
   emit(`Level palette cut from ${paletteHistogram.size.toLocaleString()} distinct RGB555 colours in the converted art.`, 86, "detail");
   addCommon(`ART\\${prefix}.ACT`, levelPalette, "MTM2 level palette, median-cut from this track's own art");
   addCommon(`FOG\\${prefix}.MAP`, makeFogMap(levelPalette), "RGB555 lookup matched to the self-contained VGA level palette");
-  const track = writeTrackFiles({ prefix, sit, lvl, terrain, textureNames, modelNames: successfulModels, vegetation: vegetationPlacements, hasLargeHdTexture, legacyFallback, options });
+  const track = writeTrackFiles({ prefix, sit, lvl, terrain, textureNames, modelNames: successfulModels, modelBounds: boundsByTitle(models), vegetation: vegetationPlacements, hasLargeHdTexture, legacyFallback, options });
   for (const generated of track.files) addCommon(generated.name, generated.data, describeGeneratedFile(generated.name));
   addCommon(track.pictureBmp, terrainBmp(terrain.raw, 257, 210, sit.courses[0]), "generated 257x210 track picture with the primary course drawn on it");
   addCommon(track.iconBmp, terrainBmp(terrain.raw, 32, 24), "generated 32x24 track-list icon");
@@ -397,11 +399,13 @@ function trackStem(sitEntry, sit, options, warnings) {
 }
 
 function modelExtent(model) {
-  let lowX = Infinity, highX = -Infinity, lowY = Infinity, highY = -Infinity;
+  let lowX = Infinity, highX = -Infinity, lowY = Infinity, highY = -Infinity, lowZ = Infinity, highZ = -Infinity;
   const preferred = model.meshes.filter(mesh => mesh.visible && !mesh.lod && mesh.indices.length);
   for (const mesh of preferred) for (let i = 0; i < mesh.positions.length; i += 3) {
     lowX = Math.min(lowX, mesh.positions[i]); highX = Math.max(highX, mesh.positions[i]);
     lowY = Math.min(lowY, mesh.positions[i + 1]); highY = Math.max(highY, mesh.positions[i + 1]);
+    // The parser has already negated Z into viewer axes; Evo's own depth is the opposite sign.
+    lowZ = Math.min(lowZ, -mesh.positions[i + 2]); highZ = Math.max(highZ, -mesh.positions[i + 2]);
   }
   if (!(highY > lowY && highX > lowX)) return null;
   /*
@@ -416,7 +420,60 @@ function modelExtent(model) {
     if (mesh.positions[i + 1] - lowY >= 0.05 * (highY - lowY)) continue;
     footprint = Math.max(footprint, Math.hypot(mesh.positions[i], mesh.positions[i + 2]));
   }
-  return { lowY, height: highY - lowY, width: highX - lowX, footprint };
+  return { lowY, highY, lowX, highX, lowZ, highZ, height: highY - lowY, width: highX - lowX, footprint };
+}
+
+/*
+  The model's own underside: over a grid of its footprint, the lowest point of its surface in
+  each cell, in Evo feet, NaN where the model has nothing overhead. This is what lets the writer
+  see where a model actually rests. A bounding box cannot: Deja Voodoo's gorge bridge carries
+  piers 90 ft into the gorge floor, so its box reads as a rock set into a hill, while its deck
+  lies level with both rims.
+
+  Each triangle is sampled at the cell centres its plan covers; a wall seen edge-on covers none
+  and says nothing about where the model rests, which is right.
+*/
+const UNDERSIDE_STEP = 8;  // ft: a quarter of an Evo terrain cell
+const UNDERSIDE_CELLS = 64;
+function undersideOf(model, extent) {
+  const { lowX, highX, lowZ, highZ } = extent;
+  const step = Math.max(UNDERSIDE_STEP, (highX - lowX) / UNDERSIDE_CELLS, (highZ - lowZ) / UNDERSIDE_CELLS);
+  const across = Math.max(1, Math.ceil((highX - lowX) / step)), deep = Math.max(1, Math.ceil((highZ - lowZ) / step));
+  const heights = new Float32Array(across * deep).fill(NaN);
+  for (const mesh of model.meshes.filter(m => m.visible && !m.lod && m.indices.length)) {
+    const p = mesh.positions;
+    // Evo's own axes: X, height, depth (the parser negated depth into viewer axes).
+    const at = index => [p[index * 3], p[index * 3 + 1], -p[index * 3 + 2]];
+    for (let t = 0; t + 2 < mesh.indices.length; t += 3) {
+      const [a, b, c] = [at(mesh.indices[t]), at(mesh.indices[t + 1]), at(mesh.indices[t + 2])];
+      const area = (b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]);
+      if (Math.abs(area) < 1e-9) continue;
+      const i0 = Math.max(0, Math.floor((Math.min(a[0], b[0], c[0]) - lowX) / step - 0.5));
+      const i1 = Math.min(across - 1, Math.ceil((Math.max(a[0], b[0], c[0]) - lowX) / step - 0.5));
+      const j0 = Math.max(0, Math.floor((Math.min(a[2], b[2], c[2]) - lowZ) / step - 0.5));
+      const j1 = Math.min(deep - 1, Math.ceil((Math.max(a[2], b[2], c[2]) - lowZ) / step - 0.5));
+      for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+        const x = lowX + (i + 0.5) * step, z = lowZ + (j + 0.5) * step;
+        const wa = ((b[0] - x) * (c[2] - z) - (c[0] - x) * (b[2] - z)) / area;
+        const wb = ((c[0] - x) * (a[2] - z) - (a[0] - x) * (c[2] - z)) / area;
+        const wc = 1 - wa - wb;
+        if (wa < -1e-6 || wb < -1e-6 || wc < -1e-6) continue;
+        const height = wa * a[1] + wb * b[1] + wc * c[1], k = i * deep + j;
+        if (!(heights[k] <= height)) heights[k] = height;
+      }
+    }
+  }
+  return { step, across, deep, heights };
+}
+
+// Every converted model's bounds in Evo feet, by title, for the writer's structure anchoring.
+function boundsByTitle(models) {
+  const bounds = new Map();
+  for (const { sourceName, model } of models) {
+    const extent = modelExtent(model);
+    if (extent) bounds.set(title(sourceName), { ...extent, underside: undersideOf(model, extent) });
+  }
+  return bounds;
 }
 
 function evenlyThin(values, limit) {

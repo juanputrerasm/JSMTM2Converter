@@ -10,7 +10,7 @@ const IMMOVABLE = "0.000000";
 // MTM2's "drive thru" box type: drawn, never collided with.
 const DRIVE_THRU = 7;
 
-export function writeTrackFiles({ prefix, sit, lvl, terrain, textureNames, modelNames, vegetation = [], hasLargeHdTexture = false, legacyFallback = false, options = {} }) {
+export function writeTrackFiles({ prefix, sit, lvl, terrain, textureNames, modelNames, modelBounds = new Map(), vegetation = [], hasLargeHdTexture = false, legacyFallback = false, options = {} }) {
   const files = [];
   const text = (name, value) => files.push({ name, data: ascii(value.replace(/\r?\n/g, CRLF)) });
   /*
@@ -29,7 +29,7 @@ export function writeTrackFiles({ prefix, sit, lvl, terrain, textureNames, model
     what was actually packed rather than from what the author asked for, and so does this.
   */
   const situation = legacyFallback ? "SIT" : "SI2";
-  text(`WORLD\\${prefix}.${situation}`, buildSit({ prefix, sit, terrain, modelNames, vegetation, pictureBmp, iconBmp, options }));
+  text(`WORLD\\${prefix}.${situation}`, buildSit({ prefix, sit, terrain, modelNames, modelBounds, vegetation, pictureBmp, iconBmp, options }));
   text(`LEVELS\\${prefix}.LVL`, buildLvl(prefix, lvl, terrain));
   text(`DATA\\${prefix}.TEX`, `${textureNames.length}\n${textureNames.join("\n")}\n`);
   text(`DATA\\${prefix}.TTY`, "0\n");
@@ -100,7 +100,7 @@ function buildLvl(prefix, lvl, terrain) {
   ].join("\n");
 }
 
-function buildSit({ prefix, sit, terrain, modelNames, vegetation, pictureBmp, iconBmp, options = {} }) {
+function buildSit({ prefix, sit, terrain, modelNames, modelBounds, vegetation, pictureBmp, iconBmp, options = {} }) {
   const out = [
     `${prefix}.LVL`, "!Race Track Name", clean(sit.trackName || prefix), "Race Track Locale", "EVO CONVERSION",
     "Track Longtitude, Latitude", "7947984,7947988", "Track Logo .BMP file", `UI\\${pictureBmp}`,
@@ -125,9 +125,11 @@ function buildSit({ prefix, sit, terrain, modelNames, vegetation, pictureBmp, ic
   const boxes = sit.boxes.filter(box =>
     (box.modelName && modelNames.has(title(box.modelName))) || isCheckpoint(box));
   out.push(String(boxes.length + vegetation.length));
+  const anchors = structureAnchors(boxes, terrain, modelBounds, options.seatOnTerrain !== false);
   for (const box of boxes) {
     const gate = isCheckpoint(box) ? checkpointBox(box, terrain) : null;
-    out.push("*********************************************", "ipos", (gate?.ipos ?? placed(box.position, terrain)).join(","), "theta,phi,psi", box.orient.map(num).join(","));
+    const ipos = gate?.ipos ?? (anchors.has(box) ? anchored(box.position, anchors.get(box), terrain) : placed(box.position, terrain));
+    out.push("*********************************************", "ipos", ipos.join(","), "theta,phi,psi", box.orient.map(num).join(","));
     if (gate) out.push("length,width,height", gate.extents.map(num).join(","));
     else out.push("model", modelNames.get(title(box.modelName)));
     /*
@@ -192,6 +194,215 @@ function placed(position, terrain) {
   // That is the AUTOMATIC fit, not the user's height factor: the factor makes hills taller,
   // and an object's height above its own patch of ground is part of the object, not a hill.
   return [num(x), num(2 * targetGround + 2 * objectScale(terrain) * (y - sourceGround)), num(z)];
+}
+
+/*
+  One vertical anchor per placed model, so that a structure Evo built in one piece is not torn
+  apart by the terrain being squeezed under it.
+
+  A placement keeps the model's own heights at true scale, 2 * objectScale altitude units per
+  Evo foot, while the terrain is usually squeezed harder to fit MTM2's byte. The two agree at
+  one point only: a placement is exact where it is anchored and drifts from the ground by
+  2 * (objectScale - terrain.scale) units for every foot the Evo ground differs from there -
+  0.605 on Terramar. placed() anchors on the ground under the object's own centre, which is
+  right for anything that stands on that ground and wrong for anything that does not.
+
+  ⛔ TERRAMAR'S BRIDGE WAS TORN IN HALF BY EXACTLY THAT. Its deck and centre span hang 50 to
+  100 ft over the river, so they were anchored on the river bed, 98 ft below the banks the
+  abutments and end piers stand on, and came out 59 units above the rest of the bridge: towers
+  on nothing, a deck cut through by its own truss. El Norte's ELBRG1 had the same fault and
+  stood 67 ft clear of its banks; Deja Voodoo's rope bridges about 40.
+
+  So a piece is anchored on what holds it up. First, if its own underside meets the terrain
+  anywhere (RESTS, see restingPoint; the "Seat models where they rest" option), at the highest
+  ground it meets - which is how Deja Voodoo's gorge bridge, whose piers look like a buried rock
+  to its bounding box, lands on both rims. Otherwise by how far its base is clear of the ground
+  under its own centre:
+    - STANDS, within REST: the anchor under its centre, exactly as before;
+    - PERCHED, within SPAN, and RESTS too: the anchor of the piece it sits on - a grandstand on a pit roof
+      takes the pit building's - and its own when it rests on nothing;
+    - SPANS, further - a deck whose centre is 95 ft over the river - or HANGING, reaching no
+      ground anywhere under it - a truss, the tower standing on it: grouped with the others like
+      it that it touches, and held by the pieces under the group or, failing those, braced by
+      the lowest it touches, as the lower truss is by the abutments. A group with nothing to
+      hold it is anchored on its own: at the highest ground a member spans, where a deck meets
+      its banks (El Norte's ELBRG1), or else on the lowest of its members' centres (Terramar's
+      biplane and its banner).
+  A perched piece is never braced sideways: rocks piled against each other would otherwise
+  drag one another toward whichever sits lowest.
+
+  ⛔ EVERYTHING ELSE IS LEFT ALONE ON PURPOSE. Anchoring every grounded piece at the highest
+  ground under it, the trees' rule, moved 591 of El Norte's rocks and hillsides by more than
+  5 ft and up to 95; anchoring pieces whose tops are level with the ground moved 282; joining
+  every touching piece into one rigid body sank El Norte's 1882 ft of tiled mountains 147 ft as
+  one and Peak's fence chain 100 ft at its low end. A fence segment is held up by the ground,
+  not by the segment beside it.
+
+  ⛔ THE GAP ANCHOR IS READ FROM THE TERRAIN FIT, NOT FROM THE DRAWN SURFACE. drawnGround takes
+  the lower of the two triangulations, which at the lip of a bank reaches down toward the valley
+  floor, and a footprint that ends at a bank samples exactly there; one such reading dropped the
+  whole bridge 21 units. The fit follows the Evo height smoothly, and it is short by half a
+  level so that rounding the heights into the byte leaves a deck on or under the bank drawn
+  under it, never above.
+
+  With the terrain at true scale every anchor is the same number and none of this moves
+  anything. Returns a Map from box to anchor, for anchored(); a box it cannot measure is left
+  to placed().
+*/
+const TOUCH = 2;           // ft: bounding boxes this close touch - Evo leaves such gaps between stacked pieces
+const REST = 1;            // ft: a base this close to the ground stands on it
+const SPAN = 10;           // ft: a centre this far above the ground under it stands over a gap
+const FOOTPRINT_STEP = 16; // ft: half an Evo terrain cell between footprint samples
+function structureAnchors(boxes, terrain, modelBounds, seatOnTerrain = true) {
+  const parts = [];
+  for (const box of boxes) {
+    const bounds = !isCheckpoint(box) && box.modelName ? modelBounds?.get(title(box.modelName)) : null;
+    if (bounds) parts.push(pieceOf(box, bounds, terrain, seatOnTerrain));
+  }
+  const touching = (a, b) => a.minX <= b.maxX + TOUCH && b.minX <= a.maxX + TOUCH
+    && a.minZ <= b.maxZ + TOUCH && b.minZ <= a.maxZ + TOUCH && a.low <= b.high + TOUCH && b.low <= a.high + TOUCH;
+  const firm = parts.map((_, i) => i).filter(i => ["stands", "perched", "rests"].includes(parts[i].kind));
+  const anchorOf = new Map();
+  /*
+    The placed piece a piece rests on: touching it, top no higher than its base, and of those
+    the highest; where several tops are level, the one it covers most. A Terramar grandstand
+    stands on a pit roof level with a wall panel beside it to a tenth of a foot, and taking the
+    panel put it 8.7 units off the building under it.
+  */
+  const overlap = (a, b) => Math.max(0, Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX))
+    * Math.max(0, Math.min(a.maxZ, b.maxZ) - Math.max(a.minZ, b.minZ));
+  const beneath = i => {
+    const supports = firm.filter(j => j !== i && anchorOf.has(j) && parts[j].high <= parts[i].low + TOUCH && touching(parts[i], parts[j]));
+    if (!supports.length) return -1;
+    const top = Math.max(...supports.map(j => parts[j].high));
+    return supports.filter(j => parts[j].high >= top - TOUCH)
+      .reduce((best, j) => overlap(parts[i], parts[j]) > overlap(parts[i], parts[best]) ? j : best);
+  };
+  // Bottom up, so that a piece perched on a perched piece finds its support already placed.
+  for (const i of [...firm].sort((a, b) => parts[a].low - parts[b].low)) {
+    const support = parts[i].kind === "stands" ? -1 : beneath(i);
+    anchorOf.set(i, support >= 0 ? anchorOf.get(support) : parts[i].anchor);
+  }
+
+  const loose = parts.map((_, i) => i).filter(i => !anchorOf.has(i));
+  const group = parts.map((_, i) => i);
+  const root = i => { while (group[i] !== i) i = group[i] = group[group[i]]; return i; };
+  for (let m = 0; m < loose.length; m++) for (let n = m + 1; n < loose.length; n++) {
+    if (touching(parts[loose[m]], parts[loose[n]])) group[root(loose[m])] = root(loose[n]);
+  }
+  const groups = new Map();
+  for (const i of loose) {
+    // Held from beneath if anything is under it, otherwise braced by whatever it touches.
+    const support = beneath(i);
+    let held = support >= 0 ? anchorOf.get(support) : Infinity;
+    if (support < 0) for (const j of firm) if (touching(parts[i], parts[j])) held = Math.min(held, anchorOf.get(j));
+    const current = groups.get(root(i)) ?? { held: Infinity, spans: Infinity, own: Infinity };
+    current.held = Math.min(current.held, held);
+    if (parts[i].kind === "spans") current.spans = Math.min(current.spans, parts[i].anchor);
+    current.own = Math.min(current.own, parts[i].anchor);
+    groups.set(root(i), current);
+  }
+  for (const i of loose) {
+    const { held, spans, own } = groups.get(root(i));
+    anchorOf.set(i, [held, spans, own].find(Number.isFinite));
+  }
+  return new Map(parts.map((part, i) => [part.box, anchorOf.get(i)]));
+}
+
+/*
+  A placed model as structureAnchors sees it: its bounding box in Evo world feet, whether its
+  base reaches the Evo ground anywhere under it, how far it is clear of the ground under its own
+  centre (see structureAnchors), and its own anchor - at the highest ground under it for a piece
+  that spans a gap, under its centre for any other.
+
+  The box is turned exactly as JSTrackViewer's evoModelMatrix draws Evo models: roll about the
+  depth axis, then pitch, then heading, in the viewer's mirrored Z. Terramar's upper bridge
+  trusses are the lower ones rolled upside down; taking a turned piece as the cube around its
+  reach instead made a 90 x 45 x 11 ft truss a 152 ft cube that reached up the bank for its
+  anchor, which pulled the whole centre span down 18 units.
+*/
+function pieceOf(box, bounds, terrain, seatOnTerrain) {
+  const [x = 0, y = 0, z = 0] = box.position;
+  const [pitch = 0, roll = 0, heading = 0] = box.orient;
+  const { lowX, highX, lowY, highY, lowZ, highZ } = bounds;
+  const cr = Math.cos(roll), sr = Math.sin(roll), cp = Math.cos(-pitch), sp = Math.sin(-pitch);
+  const ch = Math.cos(-heading), sh = Math.sin(-heading);
+  const turn = (u, h, w) => {
+    let px = u, py = h, pz = -w;
+    [px, py] = [px * cr - py * sr, px * sr + py * cr];
+    [py, pz] = [py * cp - pz * sp, py * sp + pz * cp];
+    [px, pz] = [px * ch + pz * sh, pz * ch - px * sh];
+    return [x + px, y + py, z - pz];
+  };
+  const corners = [];
+  for (const u of [lowX, highX]) for (const h of [lowY, highY]) for (const w of [lowZ, highZ]) corners.push(turn(u, h, w));
+  const piece = {
+    box,
+    low: Math.min(...corners.map(c => c[1])), high: Math.max(...corners.map(c => c[1])),
+    minX: Math.min(...corners.map(c => c[0])), maxX: Math.max(...corners.map(c => c[0])),
+    minZ: Math.min(...corners.map(c => c[2])), maxZ: Math.max(...corners.map(c => c[2])),
+  };
+  // The footprint: a grid over the box's two horizontal faces, turned into the world.
+  const across = Math.min(32, Math.max(2, Math.ceil((highX - lowX) / FOOTPRINT_STEP)));
+  const deep = Math.min(32, Math.max(2, Math.ceil((highZ - lowZ) / FOOTPRINT_STEP)));
+  let peak = null;
+  for (let i = 0; i <= across; i++) for (let j = 0; j <= deep; j++) for (const h of [lowY, highY]) {
+    const [px, , pz] = turn(lowX + (highX - lowX) * i / across, h, lowZ + (highZ - lowZ) * j / deep);
+    const ground = sampleTerrain(terrain.source, px / 32, pz / 32);
+    if (!peak || ground > peak.ground) peak = { px, pz, ground };
+  }
+  const scale = objectScale(terrain);
+  const centreGround = sampleTerrain(terrain.source, x / 32, z / 32);
+  const clear = piece.low - centreGround;
+  // The anchor that puts this Evo height exactly where the terrain fit puts it, short by half a
+  // level so the byte's rounding never leaves the piece above the surface drawn under it.
+  const fittedAnchor = ground => 2 * (clamp((ground - terrain.base) * terrain.scale, 0, 255) - GROUND_MARGIN) - 2 * scale * ground;
+  const rest = seatOnTerrain ? restingPoint(bounds.underside, lowX, lowZ, y, pitch, roll, turn, terrain) : null;
+  piece.kind = rest ? "rests"
+    : piece.low > peak.ground + REST ? "hanging" : clear > SPAN ? "spans" : clear > REST ? "perched" : "stands";
+  if (rest) {
+    piece.anchor = fittedAnchor(rest.ground);
+  } else if (piece.kind === "spans") {
+    piece.anchor = fittedAnchor(peak.ground);
+  } else {
+    // The anchor placed() uses.
+    piece.anchor = 2 * drawnGround(terrain.raw, x / 32, z / 32) - 2 * scale * centreGround;
+  }
+  return piece;
+}
+
+/*
+  Where a model's own underside rests on the Evo terrain, or null where it rests nowhere: the
+  highest ground among the cells of its underside grid lying within RESTING of the ground.
+
+  ⛔ THE HIGHEST, NOT THE AVERAGE. Deja Voodoo's gorge bridge touches the ground at both rims,
+  506 ft, and also where its arches graze the gorge walls on the way down, as low as 465; the
+  average of those put its deck 13 units above the rims. The highest is where a deck meets its
+  banks, and every lower resting point then comes out slightly buried, because squeezed terrain
+  rises there relative to the anchor, never slightly afloat.
+
+  Only an upright piece is read: the grid is the model's underside, and a piece turned over or
+  tipped has a different one. Those keep the bounding-box rules.
+*/
+const RESTING = 2; // ft: an underside this close to the ground rests on it
+function restingPoint(underside, lowX, lowZ, y, pitch, roll, turn, terrain) {
+  if (!underside || Math.cos(pitch) < 0.9998 || Math.cos(roll) < 0.9998) return null;
+  const { step, across, deep, heights } = underside;
+  let best = null;
+  for (let i = 0; i < across; i++) for (let j = 0; j < deep; j++) {
+    const height = heights[i * deep + j];
+    if (!Number.isFinite(height)) continue;
+    const [px, , pz] = turn(lowX + (i + 0.5) * step, height, lowZ + (j + 0.5) * step);
+    const ground = sampleTerrain(terrain.source, px / 32, pz / 32);
+    if (Math.abs(y + height - ground) <= RESTING && (!best || ground > best.ground)) best = { ground };
+  }
+  return best;
+}
+
+// placed() for a box whose anchor structureAnchors chose: true-scale height above that anchor.
+function anchored(position, anchor, terrain) {
+  const [x = 4096, y = 0, z = 4096] = position ?? [];
+  return [num(x), num(2 * objectScale(terrain) * y + anchor), num(z)];
 }
 
 function placedOnGround(tree, terrain) {

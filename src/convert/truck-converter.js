@@ -43,9 +43,23 @@ const ENHANCED_TIERS = [["16FL", "L"], ["16RL", "L"], ["16FR", "R"], ["16RR", "R
 // stops at 31 bytes.
 const MAX_MODEL_STEM = 12;
 
-// The axle-bar mount that suppresses MTM2's procedural suspension linkage, copied from the
-// Dodge Viper GTS-R, the reference small-tire community truck.
-const SUPPRESSED_AXLE_BARS = { x: -2, y: 999, z: 0 };
+/*
+  Where MTM2 hangs the axle bars and the driveshaft.
+
+  Measured across the stock trucks and six small-tire community trucks rather than guessed.
+  The sideways offset is always POSITIVE and small - 0.742 to 1.800 across all of them -
+  because the engine mirrors it for the two sides, so a negative value swaps them and the bars
+  come out crossed. Its height sits a fixed step above the wheel anchor: stock BIGFOOT, the
+  Pikes Peak Tacoma and the #13 CORR Nissan, three different authors, all use exactly 0.644.
+  The driveshaft then sits 0.700 above the bars, which is universal in the stock corpus.
+
+  The Dodge Viper GTS-R's "-2.000000,999.000000,0.000000" was read here as a disable switch.
+  It is not one - the engine still draws the bars - it is simply a truck shipped with a
+  negative offset, and crossed bars are exactly what that produces.
+*/
+const AXLE_BAR_SIDE_OFFSET = 1.28125;
+const AXLE_BAR_ABOVE_ANCHOR = 0.644;
+const DRIVESHAFT_ABOVE_AXLE_BAR = 0.7;
 
 const STOCK_CLUSTER = "powerbig";
 const STOCK_WAVES = ["bfootf.wav", "bfootu.wav", "bfootd.wav"];
@@ -144,6 +158,18 @@ export async function convertTruck(file, report = () => {}, requested = {}) {
   const tires = await readTireSet(pod, truck.tireModelBaseName, warnings, emit);
   if (!tires.best.L || !tires.best.R) throw new Error(`No left/right tire models found for "${truck.tireModelBaseName}".`);
 
+  /*
+    Evo measures a body from its underside and MTM2 from its middle, so the converted model is
+    re-centred on its own vertical extent and everything mounted to it - the wheel anchors, the
+    scrape hull, the light positions - moves by the same amount. Relative geometry is untouched;
+    only the origin moves, and that is where MTM2 reads the centre of mass from.
+
+    Checked against every stock Evo vehicle: raw anchors sit 0.4 to 1.8 ft below the origin, and
+    after this shift all 271 land between 2.4 and 4.0 ft below it, inside the 2.8 to 3.8 ft band
+    every MTM2 truck uses.
+  */
+  const bodyCentre = verticalCentre(body);
+
   const sourceModels = [body, bodyLod, ...Object.values(tires.models)].filter(Boolean);
   if (sourceModels.some(model => model.meshes.some(mesh => mesh.frameCount > 1))) {
     warnings.push("Animated SMF frames were reduced to frame zero.");
@@ -217,13 +243,16 @@ export async function convertTruck(file, report = () => {}, requested = {}) {
     flatten because a truck's shared atlas carries an alpha plane its bodywork never uses.
   */
   const binOptions = { heightScale: 1, faces: "truck", transparentTextures, alphaModes, bumpMaps: options.hdArt };
+  // Only the body is re-centred. Tires and the axle are drawn at the anchors, which have
+  // already moved, so shifting their geometry as well would move them twice.
+  const bodyBinOptions = { ...binOptions, heightOffset: bodyCentre };
   const evoTransparentGroups = [...new Set(sourceModels.flatMap(model => model.meshes.filter(mesh => mesh.transparent).map(mesh => mesh.groupName)))];
 
   emit("Writing MTM2 BIN models...", 56);
-  add(`MODELS\\${prefix}.BIN`, writeMtmBin(body, textureFor, binOptions), `body ${bodyEntry.name} -> MODELS\\${prefix}.BIN`);
+  add(`MODELS\\${prefix}.BIN`, writeMtmBin(body, textureFor, bodyBinOptions), `body ${bodyEntry.name} -> MODELS\\${prefix}.BIN`);
   emit(`MODEL CONVERTED ${bodyEntry.name} -> MODELS\\${prefix}.BIN (${drawableMeshes(body)} drawn meshes)`, 60, "detail");
   if (bodyLod) {
-    add(`MODELS\\${prefix}0.BIN`, writeMtmBin(bodyLod, textureFor, binOptions), `reduced body ${bodyLodEntry.name} -> MODELS\\${prefix}0.BIN`);
+    add(`MODELS\\${prefix}0.BIN`, writeMtmBin(bodyLod, textureFor, bodyBinOptions), `reduced body ${bodyLodEntry.name} -> MODELS\\${prefix}0.BIN`);
     emit(`MODEL CONVERTED ${bodyLodEntry.name} -> MODELS\\${prefix}0.BIN (${drawableMeshes(bodyLod)} drawn meshes)`, 63, "detail");
   }
 
@@ -251,10 +280,12 @@ export async function convertTruck(file, report = () => {}, requested = {}) {
   }
   emit(`MODELS CONVERTED tires -> ${tireStem}{08,10,16}{L,R} and the 2.1 set ${tireStem}{16FL,16FR,16RL,16RR}`, 74, "detail");
 
-  const anchors = WHEEL_KEYS.map(key => truck.wheelAnchors[key] ?? { x: 0, y: 0, z: 0 });
+  const anchors = WHEEL_KEYS.map(key => lower(truck.wheelAnchors[key] ?? { x: 0, y: 0, z: 0 }, bodyCentre));
   const frontTrack = Math.abs((truck.wheelAnchors["faxle.rtire.static_bpos"]?.x ?? 0) - (truck.wheelAnchors["faxle.ltire.static_bpos"]?.x ?? 0));
   const rearTrack = Math.abs((truck.wheelAnchors["raxle.rtire.static_bpos"]?.x ?? 0) - (truck.wheelAnchors["raxle.ltire.static_bpos"]?.x ?? 0));
   const axleWidth = Math.max(frontTrack, rearTrack) || 4;
+  const anchorHeight = anchors.reduce((sum, anchor) => sum + anchor.y, 0) / anchors.length;
+  const axleBarHeight = anchorHeight + AXLE_BAR_ABOVE_ANCHOR;
   const suspStem = suspSource ? textureMap.get(title(suspSource)) : null;
   const axleModel = buildAxleModel(axleWidth, suspStem ? `${suspStem}.RAW` : null);
   add(`MODELS\\${axleName}.BIN`, writeMtmBin(axleModel, textureFor, binOptions), `generated ${axleWidth.toFixed(2)} ft axle beam (Evo has no axle model)`);
@@ -264,16 +295,6 @@ export async function convertTruck(file, report = () => {}, requested = {}) {
   // Stock manifests name their art in lower case; the lookup is case-insensitive either way,
   // but matching them keeps a converted file diffable against a hand-authored one.
   const shockName = suspStem ? `${suspStem.toLowerCase()}.raw` : "shock2.raw";
-  /*
-    MTM2 draws axle bars and a driveshaft as procedural cylinders between the body and the
-    axles - monster-truck hardware that no Evo road vehicle has, and which came out as a
-    large X-shaped frame slung under the converted body.
-
-    The community idiom for a small-tire vehicle is to park the axle-bar mount out of range
-    and collapse the driveshaft onto the origin; the Dodge Viper GTS-R ships exactly this,
-    "-2.000000,999.000000,0.000000" and an all-zero driveshaft. Every converted Evo truck is
-    a road vehicle, so every one of them gets it.
-  */
   const converted = {
     truckName: truck.truckName || prefix,
     truckModelBaseName: prefix.toLowerCase(),
@@ -281,14 +302,15 @@ export async function convertTruck(file, report = () => {}, requested = {}) {
     axleModelName: `${axleName.toLowerCase()}.bin`,
     shockTextureName: shockName,
     barTextureName: shockName,
-    axlebarOffset: { ...SUPPRESSED_AXLE_BARS },
-    driveshaftPos: { x: 0, y: 0, z: 0 },
+    axlebarOffset: { x: AXLE_BAR_SIDE_OFFSET, y: axleBarHeight, z: 0 },
+    driveshaftPos: { x: 0, y: axleBarHeight + DRIVESHAFT_ABOVE_AXLE_BAR, z: 0 },
     wheelAnchors: Object.fromEntries(WHEEL_KEYS.map((key, i) => [key, anchors[i]])),
-    scrapePoints: truck.scrapePoints,
+    scrapePoints: truck.scrapePoints.map(point => lower(point, bodyCentre)),
     instrumentCluster: STOCK_CLUSTER,
     waveFiles: STOCK_WAVES,
     lights: truck.lights.map(light => ({
       ...light,
+      pos: lower(light.pos ?? { x: 0, y: 0, z: 0 }, bodyCentre),
       coneTexture: light.coneTexture && !/^NULL/i.test(light.coneTexture) && textureMap.has(title(light.coneTexture))
         ? `${textureMap.get(title(light.coneTexture)).toLowerCase()}.raw`
         : `${glowStem.toLowerCase()}.raw`,
@@ -300,8 +322,9 @@ export async function convertTruck(file, report = () => {}, requested = {}) {
   };
   add(`TRUCK\\${prefix}.TRK`, writeMtm2Truck(converted), `MTM2 2.1 manifest for ${converted.truckName}`);
 
+  warnings.push(`RIDE HEIGHT: the body was re-centred by ${bodyCentre.toFixed(3)} ft. Evo measures a vehicle from its underside and MTM2 from its middle, so without this the centre of mass sits down at axle height, which makes the truck wallow and eventually throw itself off the level.`);
+  warnings.push(`SUSPENSION: axle bars at x=${AXLE_BAR_SIDE_OFFSET}, y=${axleBarHeight.toFixed(3)} (${AXLE_BAR_ABOVE_ANCHOR} ft above the wheel anchors), driveshaft ${DRIVESHAFT_ABOVE_AXLE_BAR} ft above that, following the stock and small-tire community trucks. The sideways offset stays positive because MTM2 mirrors it and a negative one crosses the bars.`);
   warnings.push(`AXLE: Evo names "NULL.BIN" for its axle because Evo bodies carry their own moulded underbody, so a ${axleWidth.toFixed(2)} ft beam was generated. The converted body may already show suspension detail behind it.`);
-  warnings.push("SUSPENSION: MTM2's procedural axle bars and driveshaft are monster-truck hardware no Evo road vehicle has, so the axle-bar mount is parked out of range (-2, 999, 0) and the driveshaft collapsed to the origin, the way the stock small-tire community trucks do it.");
   warnings.push(`FACES: a vehicle mesh is transparent only where its own .SMF group says so and its texture has non-opaque texels${evoTransparentGroups.length ? `; this one flags ${evoTransparentGroups.slice(0, 8).join(", ")}` : ", and this one flags none, so every face is solid"}. Everything else is written as the plain textured faces stock MTM2 models use, with nothing two-sided.`);
   warnings.push(`STOCK REFERENCES: the instrument cluster ("${STOCK_CLUSTER}") and the three engine sounds (${STOCK_WAVES.join(", ")}) are stock MTM2 assets. Evo names none of them and they cannot be synthesised, so they are referenced rather than packed; every MTM2 install has them.`);
   warnings.push(`TEXTURE LOOKUP: TRK and BIN records name same-stem .RAW files following Traxx conventions. This POD packs ${artLabel}.` + (options.hdArt ? "" : " PNG art was not written, so a Community Patch 3 install will fall back to the 8-bit pair."));
@@ -413,6 +436,24 @@ function uniqueName(base, used) {
   while (used.has(value)) value = `${base.slice(0, MAX_MODEL_STEM - String(n).length)}${n++}`;
   used.add(value);
   return value;
+}
+
+/** The mid-height of a model's drawable geometry, which is where MTM2 wants the origin. */
+function verticalCentre(model) {
+  let low = Infinity, high = -Infinity;
+  for (const mesh of model.meshes) {
+    if (!mesh.visible || mesh.lod || !mesh.indices.length) continue;
+    for (let i = 1; i < mesh.positions.length; i += 3) {
+      if (mesh.positions[i] < low) low = mesh.positions[i];
+      if (mesh.positions[i] > high) high = mesh.positions[i];
+    }
+  }
+  return Number.isFinite(low) && Number.isFinite(high) ? (low + high) / 2 : 0;
+}
+
+/** Moves a body-relative point down with the re-centred origin. */
+function lower(point, offset) {
+  return { x: point?.x ?? 0, y: (point?.y ?? 0) - offset, z: point?.z ?? 0 };
 }
 
 function drawableMeshes(model) { return model.meshes.filter(mesh => mesh.visible && !mesh.lod && mesh.indices.length).length; }

@@ -42,6 +42,18 @@ export function writeMtmBin(model, textureNameFor, options = {}) {
     the pod does not contain: the caller says which case this is.
   */
   const bumpMaps = options.bumpMaps !== false;
+  /*
+    Subtracted from every vertex height, to move a model's origin.
+
+    Evo measures a body from its underside; MTM2 measures one from its middle, and takes the
+    centre of mass from there. Across all 271 stock Evo vehicles the wheel anchor sits 0.4 to
+    1.8 ft below the Evo origin where every MTM2 truck puts it 2.8 to 3.8 ft below, so a body
+    carried across unshifted drives with its mass down at axle height. See truck-converter.js.
+
+    It is applied to the integer vertex records, so the normals, plane terms and duplicate
+    keys derived from them all move with the geometry instead of having to know about it.
+  */
+  const heightOffset = options.heightOffset ?? 0;
   const meshes = model.meshes.filter(mesh => mesh.visible && !mesh.lod && mesh.indices.length);
   /*
     Whether this model sorts its own transparency into groups. Evo does that whenever a model
@@ -68,7 +80,7 @@ export function writeMtmBin(model, textureNameFor, options = {}) {
       // SMF has already been changed to viewer axes (X, height, -depth); BIN is authored in
       // Traxx axes (X, depth, height). See heightScale above for the vertical term.
       vertices[cursor++] = (mesh.positions[i] * scale[0] * 256) | 0;
-      vertices[cursor++] = (mesh.positions[i + 1] * scale[1] * heightScale * 256) | 0;
+      vertices[cursor++] = ((mesh.positions[i + 1] - heightOffset) * scale[1] * heightScale * 256) | 0;
       vertices[cursor++] = (-mesh.positions[i + 2] * scale[2] * 256) | 0;
     }
   }

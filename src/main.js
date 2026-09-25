@@ -22,7 +22,7 @@ const logPanel = document.querySelector("#log-panel");
 */
 let source = { mode: "track", trucks: [] };
 /*
-  The four conversion options. Read at Convert time rather than held in a variable, so the
+  The conversion options. Read at Convert time rather than held in a variable, so the
   boxes always say what the next conversion will actually do.
 */
 const optionBoxes = {
@@ -30,6 +30,7 @@ const optionBoxes = {
   rawFallback: document.querySelector("#opt-raw-fallback"),
   vegetationNonCollide: document.querySelector("#opt-veg-noncollide"),
   allObjectsNonCollide: document.querySelector("#opt-all-noncollide"),
+  seatOnTerrain: document.querySelector("#opt-seat-on-terrain"),
 };
 const heightFactorInput = document.querySelector("#opt-height-factor");
 const stemInput = document.querySelector("#opt-stem");

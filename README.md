@@ -92,6 +92,7 @@ The options are read when conversion begins:
 | Add RAW/ACT fallback | Off | Also packs a legacy 8-bit pair beside each compatible PNG. This substantially increases the texture payload. |
 | Vegetation is non-collide | On | Gives trees MTM2 box type 7, `drive thru`, instead of solid type 0. |
 | All objects non-collide | Off | Makes converted scenery drive-through. Checkpoints retain type 6 and continue to score; billboards lose type 8 and their collision. |
+| Seat models where they rest | On | MTM2's byte terrain is usually squeezed flatter than Evo's, so a full-size model can only match it at one height. On, a model whose own underside meets the terrain is anchored at the highest point where it does: a bridge deck lands on its banks and a gorge bridge on both rims. Off, each keeps the ground under its centre, which leaves such bridges floating over squeezed valleys but moves no rock or hillside. Pieces standing on other pieces and pieces reaching no ground follow what holds them up either way. |
 | Terrain height × | 1 | Multiplies the automatic height fit. Above 1 the 8-bit field can no longer hold the whole track, so a window centred on the racing line is kept and what lies outside it is clamped flat; the log reports how much. |
 | Track file stem | auto | Names every track file in the POD (`DATA\<stem>.*`, `LEVELS`, `FOG`, `WORLD`). Empty derives it from the `.SIT` name and moves it aside if that is a stock MTM2 track's stem. |
 
@@ -142,17 +143,36 @@ The second axle-bar set that MTM2 2.1 also supports is **not** written. Evo has 
 hardware, and inventing it would add visible parts the source truck never had; the 2.1 header
 does not require it.
 
+### Ride height: Evo and MTM2 measure a body from different places
+
+Evo puts a body model's origin at the underside of the vehicle; MTM2 puts it at the vehicle's
+vertical middle, and reads the centre of mass from there. Carrying a body across unshifted
+therefore hangs its mass down at axle height, which makes the truck wallow like a boat and
+eventually throw itself off the level.
+
+So the converted body is re-centred on its own vertical extent, and everything mounted to it —
+the wheel anchors, the scrape hull, the light positions — moves by the same amount. Relative
+geometry is untouched; only the origin moves.
+
+The numbers say this is the right correction rather than a fudge. Raw Evo anchors sit 0.4 to
+1.8 ft below the origin, where every MTM2 truck puts them 2.8 to 3.8 ft below. After
+re-centring, **all 271 stock Evo vehicles** land between 2.4 and 4.0 ft — inside MTM2's band,
+without the shift being tuned to reach it.
+
 ### Suspension linkage
 
-MTM2 draws axle bars and a driveshaft as procedural cylinders slung between the body and the
-axles. That is monster-truck hardware, and on a converted road vehicle it appears as a large
-X-shaped frame under the body that makes the truck look like it is on stilts.
+MTM2 draws axle bars and a driveshaft as procedural cylinders between the body and the axles,
+positioned by `axlebarOffset` and `driveshaftPos`. Both are derived from the converted anchors:
 
-There is no flag for turning it off, so the community idiom is to move the mount out of range.
-The Dodge Viper GTS-R — the reference small-tire truck — ships `axlebarOffset` of
-`-2.000000,999.000000,0.000000` with an all-zero `driveshaftPos`, and every converted Evo
-vehicle is written the same way. For comparison, all 20 stock trucks in `TRUCK2.POD` put that
-mount between 2.156 and 3.250 ft from the body, and none has a zero driveshaft.
+| Field | Value | Why |
+|---|---|---|
+| `axlebarOffset.x` | `1.28125` | Always positive. The engine mirrors it for the two sides, so a negative value swaps them and the bars come out visibly crossed. Stock and community trucks span 0.742 to 1.800. |
+| `axlebarOffset.y` | anchor + `0.644` | Stock BIGFOOT, the Pikes Peak Tacoma and the #13 CORR Nissan — three different authors — all use exactly this step above the wheel anchor. |
+| `driveshaftPos` | `(0, bar.y + 0.7, 0)` | 0.700 above the bars is universal across the stock corpus. |
+
+The Dodge Viper GTS-R's `-2.000000,999.000000,0.000000` was once read here as a way to switch
+the linkage off. It is not one — the engine still draws the bars — it is a truck shipped with a
+negative offset, and crossed bars are exactly what that produces.
 
 ### Transparency comes from the group, not the texture
 
@@ -404,8 +424,7 @@ track name, selected options, converter build identifier, and the relevant warni
 
 - [JSTrackViewer](https://github.com/juanputrerasm/JSTrackViewer): browser-based 3D viewer used
   to inspect converted tracks and validate generated situation files.
-- [JTraxx](https://github.com/juanputrerasm/JTraxx3): desktop MTM/MTM2 track editor and the
-  source of several format conventions reproduced by this converter.
+- [JSTruckViewer](https://github.com/juanputrerasm/JSTruckViewer): browser-based MTM1 and MTM2 truck viewer.
 - [JSPod](https://github.com/juanputrerasm/JSPod): browser-based POD archive and asset viewer.
 
 ## Credits and license

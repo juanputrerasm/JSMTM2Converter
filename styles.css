@@ -7,7 +7,10 @@ html, body { min-height:100%; margin:0; }
 body { background:var(--bg); color:var(--text); font:13px var(--font); }
 .app-shell { min-height:100vh; display:flex; flex-direction:column; }
 .topbar { display:flex; align-items:center; gap:18px; padding:10px 16px; background:var(--surface); border-bottom:1px solid var(--border); }
-.brand h1 { color:var(--accent); font-size:17px; margin:0; }.brand p { color:var(--dim); margin:2px 0 0; font-size:11px; }
+.brand h1 { color:var(--accent); font-size:17px; margin:0; }
+.brand h1 a { color:inherit; text-decoration:none; }
+.app-version { margin-left:4px; color:var(--dim); font-size:11px; font-weight:500; }
+.brand p { color:var(--dim); margin:2px 0 0; font-size:11px; }
 .badge { margin-left:auto; color:var(--dim); font:11px var(--mono); }
 main { width:min(1040px, calc(100% - 28px)); margin:22px auto; display:grid; gap:14px; }
 .panel { background:var(--surface); border:1px solid var(--border); border-radius:5px; padding:14px; }

@@ -9,7 +9,7 @@
 <body>
   <div class="app-shell">
     <header class="topbar">
-      <div class="brand"><h1>JSMTM2Converter</h1><p>4x4 Evo 1 & 2 to MTM2 HD track and truck converter</p></div>
+      <div class="brand"><h1><a href="https://github.com/juanputrerasm/JSMTM2Converter">JSMTM2Converter <span class="app-version">v0.8.0</span></a></h1><p>4x4 Evo 1 & 2 to MTM2 HD track and truck converter</p></div>
       <div class="badge">POD1/POD2 → POD1 · Evo SIT v6/v7 → MTM2 SIT/SI2 · Evo TRK v6/v7 → MTM2 2.1</div>
     </header>
     <main>
@@ -37,6 +37,8 @@
             <span><strong>Vegetation is non-collide</strong><em>Trees use MTM2 box type 7, "drive thru".</em></span></label>
           <label class="track-only"><input id="opt-all-noncollide" type="checkbox">
             <span><strong>All objects non-collide</strong><em>Every converted scenery object becomes drive-thru. Checkpoints keep type 6 and are still scored.</em></span></label>
+          <label class="track-only"><input id="opt-seat-on-terrain" type="checkbox" checked>
+            <span><strong>Seat models where they rest</strong><em>A model whose own underside meets the terrain is placed where it meets it, so a bridge deck lands on both of its banks. Off keeps each on the ground under its centre; squeezed terrain can shift either choice.</em></span></label>
           <label class="track-only field"><input id="opt-height-factor" type="number" min="0.25" max="4" step="0.05" value="1">
             <span><strong>Terrain height ×</strong><em>1 fits the whole track into MTM2's 256 height levels. Higher restores hills; the log reports what far from the course is clamped flat. Convert, preview, adjust.</em></span></label>
           <label class="track-only field"><input id="opt-stem" type="text" maxlength="8" placeholder="auto" pattern="[A-Za-z0-9_]{1,8}" spellcheck="false" autocomplete="off">
@@ -57,6 +59,6 @@
       <aside class="note track-only" id="page-note" hidden>Runs locally in your browser. The converter preserves Evo's 256×256 horizontal terrain grid, but MTM2 only has an 8-bit height field, so tall tracks are compressed vertically; the terrain height factor trades that back against what lies far from the course. Preview keeps one JSTrackViewer tab open and reloads it with every conversion.</aside>
     </main>
   </div>
-  <script type="module" src="./src/main.js?build=2026-09-14.36-preview-probe"></script>
+  <script type="module" src="./src/main.js?build=2026-09-25.40-v0.8.0"></script>
 </body>
 </html>
