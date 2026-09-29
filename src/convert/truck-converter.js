@@ -242,7 +242,7 @@ export async function convertTruck(file, report = () => {}, requested = {}) {
     That is what returns lamps and glass, which the previous blanket "write it all solid" had to
     flatten because a truck's shared atlas carries an alpha plane its bodywork never uses.
   */
-  const binOptions = { heightScale: 1, faces: "truck", transparentTextures, alphaModes, bumpMaps: options.hdArt };
+  const binOptions = { faces: "truck", transparentTextures, alphaModes, bumpMaps: options.hdArt };
   // Only the body is re-centred. Tires and the axle are drawn at the anchors, which have
   // already moved, so shifting their geometry as well would move them twice.
   const bodyBinOptions = { ...binOptions, heightOffset: bodyCentre };

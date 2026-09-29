@@ -16,13 +16,15 @@ const REFLECT = 0x0020, TWOSIDED = 0x0080;
 export function writeMtmBin(model, textureNameFor, options = {}) {
   const scale = options.scale ?? [1, 1, 1];
   /*
-    Track scenery is drawn through a world matrix that maps BIN (X, depth, height) to
-    (X, .75H, -D), so a track model's height is pre-divided here to survive it. Trucks are not
-    drawn through that matrix: a stock MTM2 tire (BFC16L.BIN) measures 6.000 ft deep by 6.000
-    ft tall, authored perfectly round, which it could not be if the engine squashed it. So the
-    truck path passes 1 and the track path keeps the compensation.
+    Heights are written 1:1, like the other two axes: MTM2 draws a BIN unit as one foot every way.
+
+    ⛔ DO NOT PRE-STRETCH A TRACK MODEL BY 1/0.75. Traxx pushes a 768/1024 Z stretch onto every
+    object, but that converts to its own vertical units (96 per foot against 128 horizontally)
+    and is not a squash the game applies. Writing heights at 4/3 made every converted tree,
+    building and bridge a third too tall in game and in Blender alike - an Oak115 came out 153
+    ft. Stock scenery is authored true: JUNK's lying barrel 8BBARRL1 is 3.41 in both X and Z,
+    and SPHERE.BIN is 19.39 on all three axes. See TRUE_SCALE in terrain.js.
   */
-  const heightScale = options.heightScale ?? 1 / 0.75;
   const transparentTextures = options.transparentTextures ?? new Set();
   // An explicit "write this solid whatever the art says", for a caller that cannot trust either
   // the group flags or the texture. Nothing passes it now that each mode names its own authority.
@@ -78,9 +80,9 @@ export function writeMtmBin(model, textureNameFor, options = {}) {
   for (const mesh of meshes) {
     for (let i = 0; i < mesh.positions.length; i += 3) {
       // SMF has already been changed to viewer axes (X, height, -depth); BIN is authored in
-      // Traxx axes (X, depth, height). See heightScale above for the vertical term.
+      // Traxx axes (X, depth, height).
       vertices[cursor++] = (mesh.positions[i] * scale[0] * 256) | 0;
-      vertices[cursor++] = ((mesh.positions[i + 1] - heightOffset) * scale[1] * heightScale * 256) | 0;
+      vertices[cursor++] = ((mesh.positions[i + 1] - heightOffset) * scale[1] * 256) | 0;
       vertices[cursor++] = (-mesh.positions[i + 2] * scale[2] * 256) | 0;
     }
   }

@@ -249,16 +249,15 @@ crop the map horizontally. The loss is vertical: Evo stores an unsigned 16-bit h
 1/32-unit precision, while MTM2 terrain has only 256 possible byte values. Evo can therefore
 represent much taller terrain and much finer elevation changes.
 
-The converter uses a global linear remap. Since MTM2's 64-unit terrain cells are twice Evo's
-32-unit cells and MTM2 renders each RAW step as three vertical units, the preferred conversion
-factor is 2/3 RAW steps per Evo unit. It is reduced only when the complete source altitude
+The converter uses a global linear remap. One MTM2 RAW step is 2 ft, so the preferred conversion
+factor is 1/2 RAW step per Evo foot, which keeps every slope as authored. It is reduced only when the complete source altitude
 range cannot fit in 0..255. Objects and course points are bilinearly re-grounded against the
 converted RAW so they stay aligned. Blind spatial smoothing is intentionally not applied
 because it moves road surfaces and jump lips; very tall tracks may still need selective
 smoothing/tuning after the first visual inspection.
 
 The **terrain height factor** trades that back. Deja Voodoo's 724 ft go in at 0.352 RAW levels per
-foot, 53% of their true slope, so its hills read flatter than in Evo. Raising the factor restores
+foot, 70% of their true slope, so its hills read flatter than in Evo. Raising the factor restores
 them, but the byte then cannot hold the whole range: a 255-level window is kept and everything
 outside it is clamped flat. The window is centred on the racing line, not pinned to the lowest
 valley, because the course is what has to keep its shape and distant peaks are what can afford to
@@ -303,17 +302,24 @@ clamped, and warns if the racing line itself no longer fits.
   `-length..+length` on axis 1 and `-width..+width` on axis 0 - while Evo carries a full size on
   its own (x, up, z). The horizontal factors cancel as they do for positions: MTM2's world is
   twice Evo's and the situation file stores half-units. The vertical one does not. An extent is
-  in world units, where MTM2 draws terrain at 3 per RAW level and a SIT altitude at 1.5, so an
-  Evo foot is two of them. Baja Beach's `147,66,2` becomes `2,147,66`.
+  in Traxx world units, where MTM2 draws terrain at 3 per RAW level and a SIT altitude, one foot,
+  at 1.5, so an Evo foot is 1.5 of them. Baja Beach's `147,66,2` becomes `2,147,49.5` before the
+  gate is grown down to the ground.
 - Anything measured against a model - a tree's half height, an object's clearance above its own
-  patch of ground, a gate's height - converts at a fixed 2 world units per Evo foot, never at the
+  patch of ground, a gate's height - converts at a fixed one SIT altitude per Evo foot, never at the
   scale the terrain happened to be fitted to. A model keeps its size however much the height
   field had to be squeezed, so tying model distances to the terrain's fit sinks objects into the
   ground, by more the more the terrain was compressed. The constant is measured: across 604 stock
   MTM2 placements of flat-bottomed models on dead-flat ground, a model's lowest vertex meets the
-  terrain when one BIN unit is 1.5 world units (median residual 0.00), and our vertical records
-  are pre-divided by 0.75. Lifting trees by 2/3 of their half height instead of the full 2 buried
-  each one by a third of it - about 19 units on a 115 ft jungle tree.
+  terrain when one BIN unit is 1.5 world units, one SIT altitude (median residual 0.00).
+- Model heights are written 1:1, exactly like the other two axes. Earlier builds stretched every
+  track model's height by 4/3 to undo a 0.75 Z stretch that Traxx applies, and scaled object
+  offsets and the terrain's true slope to match (2/3 RAW steps per foot). That 0.75 is Traxx
+  converting to its own vertical units, not a squash the game applies, so every converted model
+  came out a third too tall in game and in Blender alike: an Oak115 measured 153 ft. Stock art
+  is authored 1:1 (JUNK's lying barrel is round in X and Z, `SPHERE.BIN` is 19.39 on every
+  axis), and a hand conversion of Terramar that is right in game stacks its pieces at exactly
+  3/4 of what the old scale gave.
 - Objects are grounded against the surface the engine draws, not the height field it was fitted
   from. Sampling the Evo source and rounding it to a level is a subtly different surface: it
   interpolates at full precision and then rounds, while the engine interpolates levels that were
@@ -334,7 +340,7 @@ clamped, and warns if the racing line itself no longer fits.
   by that same drop and makes the overhang worse; level ground is unaffected either way. Sixteen
   points miss the true low of a disk by a median of 0.013 world units where eight miss by 0.056,
   and interior samples add nothing, so the last tenths are covered by sinking every tree a further
-  half level (1.5 world units, about nine inches) rather than by sampling harder.
+  half level (1.5 world units, one foot) rather than by sampling harder.
 - A gate is then grown downward until it reaches the terrain, measured over its whole footprint
   against the converted RAW grid rather than under its centre. Only the base moves, so a gate
   never grows up into scenery. Evo's own gates are usually sunk into the ground already and need

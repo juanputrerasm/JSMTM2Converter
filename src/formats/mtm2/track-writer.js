@@ -204,7 +204,7 @@ function placed(position, terrain) {
   Evo foot, while the terrain is usually squeezed harder to fit MTM2's byte. The two agree at
   one point only: a placement is exact where it is anchored and drifts from the ground by
   2 * (objectScale - terrain.scale) units for every foot the Evo ground differs from there -
-  0.605 on Terramar. placed() anchors on the ground under the object's own centre, which is
+  0.272 on Terramar. placed() anchors on the ground under the object's own centre, which is
   right for anything that stands on that ground and wrong for anything that does not.
 
   ⛔ TERRAMAR'S BRIDGE WAS TORN IN HALF BY EXACTLY THAT. Its deck and centre span hang 50 to
@@ -426,8 +426,8 @@ function placedOnGround(tree, terrain) {
   const targetGround = footprintGround(terrain.raw, tree.x / 32, tree.z / 32, (tree.footprint ?? 0) / 32) - GROUND_MARGIN;
   /*
     A tree is lifted by its own half height, so that its trunk meets the ground. That is a
-    distance measured against the model, so it converts at 2 world units per Evo foot and a SIT
-    altitude is 1.5 world units - hence twice the object scale. It used to be 2/3 of the
+    distance measured against the model, so it converts at one SIT altitude per Evo foot - twice
+    the object scale. It used to be 2/3 of the
     clearance, exactly half of what the model needs, which buried every tree by a third of its
     half height: 13 units of JUNGLE80, 19 of JUNGLE115, worse the taller the tree and worse
     again on a track whose terrain had to be squeezed harder.
@@ -460,7 +460,7 @@ function placedOnGround(tree, terrain) {
 const RAW_TO_WORLD = 3, SIT_TO_WORLD = 1.5;
 
 /*
-  Half a level of extra sink for a planted model, which is 1.5 world units or about nine inches.
+  Half a level of extra sink for a planted model, which is 1.5 world units or one foot.
 
   Sampling a trunk's footprint cannot find the very lowest point of a piecewise surface exactly,
   and it does not have to: the residual measured against a 449-point reference is a tenth of a
@@ -510,17 +510,20 @@ function boxTypeFor(box, options) {
   ⚠ IT IS THE TRUE SCALE, NOT THE TRACK'S FITTED ONE. A model is drawn at its own size however
   much the terrain had to be squeezed to fit MTM2's 256 height levels, so a distance measured
   against a model - a tree's half height, a rock's origin above its base, a gate's height -
-  converts at the constant the world uses and not at this track's fit: 2/3 RAW levels per Evo
-  foot, which is 2 world units per foot, the same as the horizontal, where a 64-unit MTM2 cell
-  covers a 32-foot Evo one.
+  converts at the constant the world uses and not at this track's fit: 1/2 RAW level per Evo
+  foot, which is one SIT altitude unit and one BIN unit per foot (see TRUE_SCALE in terrain.js).
 
   Measured, not assumed. Across 604 stock MTM2 placements of flat-bottomed models standing on
   dead-flat ground, a model's own lowest vertex lands exactly on the terrain when one BIN unit
-  (1/256) is worth 1.5 world units: median residual 0.00, with 98-100% of ALASKA's, CRAZY98's
-  and ROCKQRY's within a single unit, and every other factor off by a wide margin. Our vertical
-  records are pre-divided by 0.75, so 1.5 there is 2 world units per Evo foot here.
+  (1/256) is worth 1.5 world units, one SIT altitude: median residual 0.00, with 98-100% of
+  ALASKA's, CRAZY98's and ROCKQRY's within a single unit, and every other factor off by a wide
+  margin. Model heights are written 1:1, so that is 1.5 world units per Evo foot here.
+
+  ⛔ IT USED TO BE 2/3, "2 world units per foot, the same as the horizontal". Traxx's world
+  units are not the same size both ways in game, and 2/3 put every object offset, like every
+  model height, 4/3 too high.
 */
-function objectScale(terrain) { return terrain.trueScale ?? 2 / 3; }
+function objectScale(terrain) { return terrain.trueScale ?? 1 / 2; }
 
 function firstStart(sit) { return sit.courses[0]?.segments[0]?.start ?? [4096, 0, 4096]; }
 function isCheckpoint(box) { return box.sourceClass === "CCheckpoint" || box.boxType === 6; }
