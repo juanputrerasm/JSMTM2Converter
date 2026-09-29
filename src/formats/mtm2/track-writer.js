@@ -1,10 +1,21 @@
 import { title } from "../../shared/paths.js";
 import { BUILD_ID } from "../../build-info.js";
+import {
+  buildMtm2Lte, emptyGroundBoxGrids, writeEmptyList, writeMtm2Lvl, writeMtm2Sit, writeTexList,
+} from "../../vendor/openphotex/index.js";
+
+/*
+  The file layouts (SIT, LVL, TEX, LTE and the ground-box grids) are OpenPhotex's MTM2 writers.
+  This file decides what goes in them: where each converted object, truck and course point
+  stands on the converted terrain, which box type it gets, and which course the field follows.
+*/
 
 const CRLF = "\r\n";
 const ascii = value => new TextEncoder().encode(value);
 // Extended course slots MTM2 levels actually use, and the one the AI field is sent to.
 const EXTENDED_COURSES = 2, AI_COURSE = 2;
+// The "Your Truck" slot's course: it is not a racer.
+const PLAYER_COURSE = 0;
 // MTM2 reads a zero mass as "this object cannot be pushed".
 const IMMOVABLE = "0.000000";
 // MTM2's "drive thru" box type: drawn, never collided with.
@@ -29,41 +40,15 @@ export function writeTrackFiles({ prefix, sit, lvl, terrain, textureNames, model
     what was actually packed rather than from what the author asked for, and so does this.
   */
   const situation = legacyFallback ? "SIT" : "SI2";
-  text(`WORLD\\${prefix}.${situation}`, buildSit({ prefix, sit, terrain, modelNames, modelBounds, vegetation, pictureBmp, iconBmp, options }));
-  text(`LEVELS\\${prefix}.LVL`, buildLvl(prefix, lvl, terrain));
-  text(`DATA\\${prefix}.TEX`, `${textureNames.length}\n${textureNames.join("\n")}\n`);
-  text(`DATA\\${prefix}.TTY`, "0\n");
-  text(`DATA\\${prefix}.PUP`, "0\n"); text(`DATA\\${prefix}.ANI`, "0\n");
-  text(`DATA\\${prefix}.TDF`, "0\n"); text(`DATA\\${prefix}.DEF`, "0\n"); text(`DATA\\${prefix}.NAV`, "0\n");
+  files.push({ name: `WORLD\\${prefix}.${situation}`, data: writeMtm2Sit(sitDocument({ prefix, sit, terrain, modelNames, modelBounds, vegetation, pictureBmp, iconBmp, options })) });
+  files.push({ name: `LEVELS\\${prefix}.LVL`, data: writeMtm2Lvl(lvlDocument(prefix, lvl, terrain)) });
+  files.push({ name: `DATA\\${prefix}.TEX`, data: writeTexList(textureNames) });
+  for (const extension of ["TTY", "PUP", "ANI", "TDF", "DEF", "NAV"]) files.push({ name: `DATA\\${prefix}.${extension}`, data: writeEmptyList() });
   text(`DATA\\${prefix}.TXV`, `# MTM2 track version record - written by JSMTM2Converter\nformatVersion=1\ntool=JSMTM2Converter\ntoolVersion=${BUILD_ID}\nlegacyFallback=${legacyFallback ? 1 : 0}\nhdTextures=${hasLargeHdTexture ? 1 : 0}\n`);
-  files.push({ name: `DATA\\${prefix}.LTE`, data: makeLte(terrain, sunVector(lvl)) });
-  for (const grid of groundBoxGrids(prefix)) files.push(grid);
+  files.push({ name: `DATA\\${prefix}.LTE`, data: buildMtm2Lte(terrain.raw, sunVector(lvl)) });
+  // Evo has no ground boxes, so every grid takes the stock "no boxes anywhere" value.
+  for (const [extension, data] of Object.entries(emptyGroundBoxGrids())) files.push({ name: `DATA\\${prefix}.${extension}`, data });
   return { files, situation, pictureBmp: `UI\\${pictureBmp}`, iconBmp: `UI\\${iconBmp}` };
-}
-
-/*
-  The ground-box terrain grids. MTM2 derives these nine names from the .LVL's RAW entry and
-  reads them for every level, so they are not optional companions: all fifteen stock MTM2
-  terrain sets ship the complete set, MAIN.POD included, and Traxx writes them unconditionally.
-  A track that omits them leaves the engine's grids holding whatever the previously loaded
-  level put there, which is why the terrain lit correctly under overcast weather but not under
-  the Clear sun path that consults them.
-
-  Evo has no ground-box equivalent, so every grid takes the "no boxes anywhere" value the stock
-  files use: zero lower/upper altitudes (RA0/RA1), zero face textures (CL0/CL1/CL2), and the
-  0xFF floor/ceiling pair (RA2/RA3) that marks the second layer as solid rock rather than an
-  open cavern at height zero. RA4/RA5 are zero in every stock track.
-*/
-function groundBoxGrids(prefix) {
-  const grid = (extension, bytes, fill) => ({
-    name: `DATA\\${prefix}.${extension}`,
-    data: fill ? new Uint8Array(bytes).fill(fill) : new Uint8Array(bytes),
-  });
-  return [
-    grid("RA0", 65536), grid("RA1", 65536), grid("RA2", 65536, 0xff), grid("RA3", 65536, 0xff),
-    grid("RA4", 65536), grid("RA5", 65536),
-    grid("CL0", 12 * 65536), grid("CL1", 4 * 65536), grid("CL2", 12 * 65536),
-  ];
 }
 
 /*
@@ -85,104 +70,73 @@ export function sunVector(lvl) {
   return source.map(component => component / length);
 }
 
-function buildLvl(prefix, lvl, terrain) {
+function lvlDocument(prefix, lvl, terrain) {
   // Evo's LVL water value is in half-units; terrain and placements are ordinary world units.
-  const water = Math.round(4 * terrain.mapHeight(lvl.water.height / 2));
-  const sun = sunVector(lvl).map(component => Math.round(component * SUN_FIXED_POINT)).join(",");
-  return [
-    "0", `${prefix}.TXT`, `${prefix}.RAW`, `${prefix}.CLR`, `${prefix}.ACT`, `${prefix}.TEX`,
-    "ZERO.RAW", `${prefix}.PUP`, `${prefix}.ANI`, `${prefix}.TDF`, "CLOUDY2.RAW", "CLOUDY2.ACT",
-    `${prefix}.DEF`, `${prefix}.NAV`, "ROCKX.WAV", `${prefix}.FOG`, `${prefix}.LTE`,
-    // Line 18 is the track's own sun. The four values after it are the same in all fifteen
-    // stock MTM2 levels apart from the shade scalar (23000..40960), so they stay stock:
-    // runtime shade scalar, sun position, intensity, and the trailing 255.
-    sun, "40960", "32000,-46333,0", "64000", "255", "!waterHeight", String(water), "",
-  ].join("\n");
+  return {
+    descriptionTxt: `${prefix}.TXT`, rawName: `${prefix}.RAW`, clrName: `${prefix}.CLR`, actName: `${prefix}.ACT`, texName: `${prefix}.TEX`,
+    pupName: `${prefix}.PUP`, aniName: `${prefix}.ANI`, tdfName: `${prefix}.TDF`, defName: `${prefix}.DEF`, navName: `${prefix}.NAV`,
+    fogName: `${prefix}.FOG`, lteName: `${prefix}.LTE`,
+    // Line 17 is the track's own sun; the four values after it stay stock.
+    sunVector: sunVector(lvl).map(component => Math.round(component * SUN_FIXED_POINT)),
+    waterHeight: Math.round(4 * terrain.mapHeight(lvl.water.height / 2)),
+  };
 }
 
-function buildSit({ prefix, sit, terrain, modelNames, modelBounds, vegetation, pictureBmp, iconBmp, options = {} }) {
-  const out = [
-    `${prefix}.LVL`, "!Race Track Name", clean(sit.trackName || prefix), "Race Track Locale", "EVO CONVERSION",
-    "Track Longtitude, Latitude", "7947984,7947988", "Track Logo .BMP file", `UI\\${pictureBmp}`,
-    "Track Map .BMP file", `UI\\${iconBmp}`, "Track Fly-By .AVI file", "Sonic", "Track Announcer .WAV file", "Track",
-    // MTM2 situation files name the UI bitmaps with their folder and the description with the
-    // DATA stem; stock TPARK reads "UI\Farm.bmp" and "tpark.txt" in these three slots.
-    "Track Description .TXT file", `${prefix}.TXT`, "Track Race Type", String(sit.raceType || 0), "@Redbook Audio Track", "2",
-    "!ambient sound,track length,weather mask", `${sit.ambientSound || 0},${num(sit.trackLength)},${sit.weatherMask || 0}`,
-    "viewmode,spotd,spotp,spoth,zoom", "0,16384,-16383,24832,98304", "$racetime, raceStartTime, dragDebugTimer", "0,0,0",
-    "controlflag, autoShift, autoStage, bothStaged, bothStagedPrev", "0,1,0,0,0", "stageComFlag, bonusLapFlag", "0,0",
-  ];
+function sitDocument({ prefix, sit, terrain, modelNames, modelBounds, vegetation, pictureBmp, iconBmp, options = {} }) {
   const starts = sit.vehicles.length ? sit.vehicles : [{ position: firstStart(sit), orient: [0,0,0] }];
-  out.push("*** Your Truck (Not used anymore) ***", "*********************************************");
-  truck(out, starts[0], terrain, 0);
-  out.push("*** Vehicles ***", "8");
-  // Every racer follows extended course 2 in all fifteen stock levels, and Traxx's own notes
-  // record the same ("Trucks always follow course 2???"). Evo's courseToFollow indexes Evo's
-  // course list, not MTM2's four extended slots, so carrying it across pointed the field at
-  // course 1 - the slot MTM2 uses for the map route - instead.
-  for (let i = 0; i < 8; i++) { out.push("*********************************************"); truck(out, starts[i % starts.length], terrain, AI_COURSE); }
-  out.push("*** Ramps ***", "0", "*** Boxes ***");
+  const truck = (vehicle, courseToFollow) => ({ position: placed(vehicle.position, terrain), orient: vehicle.orient, courseToFollow });
   const boxes = sit.boxes.filter(box =>
     (box.modelName && modelNames.has(title(box.modelName))) || isCheckpoint(box));
-  out.push(String(boxes.length + vegetation.length));
   const anchors = structureAnchors(boxes, terrain, modelBounds, options.seatOnTerrain !== false);
-  for (const box of boxes) {
+  const placements = boxes.map(box => {
     const gate = isCheckpoint(box) ? checkpointBox(box, terrain) : null;
-    const ipos = gate?.ipos ?? (anchors.has(box) ? anchored(box.position, anchors.get(box), terrain) : placed(box.position, terrain));
-    out.push("*********************************************", "ipos", ipos.join(","), "theta,phi,psi", box.orient.map(num).join(","));
-    if (gate) out.push("length,width,height", gate.extents.map(num).join(","));
-    else out.push("model", modelNames.get(title(box.modelName)));
+    const position = gate?.ipos ?? (anchors.has(box) ? anchored(box.position, anchors.get(box), terrain) : placed(box.position, terrain));
     /*
       Mass zero is MTM2's "cannot be moved" - 195 of TPARK's 398 boxes are written that way
       and everything with a non-zero mass there is deliberately knockable. Evo scenery is
       static, so a converted rock, hut or wreck must not be shovable; 1000 made every one of
       them a prop the truck could push around.
     */
-    out.push("mass", IMMOVABLE, "bvel", "0,0,0", "p,q,r", "0,0,0",
-      "!type,flags", `${boxTypeFor(box, options)},0`, "priority", "0", "@sound effect entries", "NULL.WAV", "NULL.WAV", "0,0");
-  }
+    return gate
+      ? { position, orient: box.orient, extents: gate.extents, mass: IMMOVABLE, type: boxTypeFor(box, options) }
+      : { position, orient: box.orient, modelName: modelNames.get(title(box.modelName)), mass: IMMOVABLE, type: boxTypeFor(box, options) };
+  });
+  // Type 7 is MTM2's "drive thru" - vegetation never collides - and mass zero keeps it rooted
+  // rather than merely intangible.
   for (const tree of vegetation) {
-    out.push("*********************************************", "ipos", placedOnGround(tree, terrain).join(","), "theta,phi,psi", `0.00,0.00,${num(tree.yaw)}`,
-      // Type 7 is MTM2's "drive thru" - vegetation never collides - and mass zero keeps it
-      // rooted rather than merely intangible.
-      "model", tree.modelName, "mass", IMMOVABLE, "bvel", "0,0,0", "p,q,r", "0,0,0",
-      "!type,flags", `${options.vegetationNonCollide === false ? 0 : DRIVE_THRU},0`, "priority", "0", "@sound effect entries", "NULL.WAV", "NULL.WAV", "0,0");
+    placements.push({ position: placedOnGround(tree, terrain), orient: [0, 0, tree.yaw], modelName: tree.modelName, mass: IMMOVABLE,
+      type: options.vegetationNonCollide === false ? 0 : DRIVE_THRU });
   }
-  out.push("*** Cylinders ***", "0", "*** Top Crush ***", "0", "*** Course ***", "c1Count,course_direction");
-  course(out, sit.courses[0], terrain);
-  /*
-    The extended courses. All fifteen stock MTM2 levels fill [Course 1] and [Course 2] and
-    leave [Course 3] and [Course 4] at "0,0" - and all of them send every racer to course 2
-    (see the truck writer). Filling 3 and 4 as well, as this used to, publishes two routes no
-    stock track has and no truck asks for. An Evo level that authors alternate racing lines
-    supplies them here; otherwise both AI routes repeat the primary line.
-  */
-  out.push("@*********** Extended Course Definitions *************", "4");
-  for (let i = 0; i < 4; i++) {
-    out.push(`[Course ${i + 1}] c1Count,course_direction`);
-    if (i >= EXTENDED_COURSES) { out.push("0,0"); continue; }
-    const alternate = sit.courses[i + 1];
-    course(out, alternate?.segments?.length >= 3 ? alternate : sit.courses[0], terrain);
-  }
-  out.push("*** Stadium ***", "stadiumFlag,stadiumModelName", "0,none", "*** Backdrop ***", "backdropType,backdropCount", "0,0", "backdropModelName", "");
-  return out.join("\n");
-}
-
-function truck(out, vehicle, terrain, courseNumber) {
-  out.push("truckFile", "POWERBIG.TRK", "ipos", placed(vehicle.position, terrain).join(","), "bvel", "0,0,0", "theta,phi,psi", vehicle.orient.map(num).join(","),
-    "p,q,r", "0,0,0", "faxle.angle,faxle.steering_angle", "0,0", "faxle.rtire.on_gnd,faxle.ltire.on_gnd", "-1,1",
-    "raxle.angle,raxle.steering_angle", "0,0", "raxle.rtire.on_gnd,raxle.ltire.on_gnd", "-1,1", "xm.gear", "4",
-    "ap.autopilot,ap.cnumber", "0,1", "ap.speed_control,ap.course_control,ap.lasterror", "0,0,0", "!ap.courseToFollow", String(courseNumber),
-    "$heliTimer,heliTheta,heliPhi,heliPsi", "0,0,0,0", "heliPos", "0,0,0", "^segments,laps,staged,bonusLaps,finishedRace,nextcheckpoint", "0,0,0,0,0,0", "totalracetime,fastestLap,dragTimer", "0,0,0");
-  for (let lap = 0; lap < 20; lap++) out.push("***Lap time***", "0", "*****Checkpoint times*****", ...Array(20).fill("0"));
-}
-
-function course(out, value, terrain) {
-  const segments = value?.segments ?? []; out.push(`${segments.length},0`);
-  segments.forEach((segment, i) => out.push(`********************************************* ${2*i+1}`, "ctype,cspeed_type", "1,0",
-    "cstart", placed(segment.start, terrain).join(","), "cend", placed(segment.end, terrain).join(","),
-    // Stock levels record 0 here (WAR's arena is the one exception at 16), and so does Evo.
-    "cdec_point,cspeed,lastentry", "30,0,0", "&cSpeedLimit,cTrackWidth", `${num(segment.speedLimit)},${num(segment.trackWidth)}`));
+  const route = value => (value?.segments ?? []).map(segment => ({
+    start: placed(segment.start, terrain), end: placed(segment.end, terrain), speedLimit: segment.speedLimit, trackWidth: segment.trackWidth,
+  }));
+  return {
+    lvlName: `${prefix}.LVL`, trackName: sit.trackName || prefix, localeName: "EVO CONVERSION",
+    // MTM2 situation files name the UI bitmaps with their folder and the description with the
+    // DATA stem; stock TPARK reads "UI\Farm.bmp" and "tpark.txt" in these three slots.
+    pictureBmp: `UI\\${pictureBmp}`, iconBmp: `UI\\${iconBmp}`, descriptionTxt: `${prefix}.TXT`,
+    raceType: sit.raceType || 0, ambientSound: sit.ambientSound || 0, trackLength: sit.trackLength, weatherMask: sit.weatherMask || 0,
+    yourTruck: truck(starts[0], PLAYER_COURSE),
+    // Every racer follows extended course 2 in all fifteen stock levels, and Traxx's own notes
+    // record the same ("Trucks always follow course 2???"). Evo's courseToFollow indexes Evo's
+    // course list, not MTM2's four extended slots, so carrying it across pointed the field at
+    // course 1 - the slot MTM2 uses for the map route - instead.
+    vehicles: Array.from({ length: 8 }, (_, i) => truck(starts[i % starts.length], AI_COURSE)),
+    boxes: placements,
+    course: route(sit.courses[0]),
+    /*
+      The extended courses. All fifteen stock MTM2 levels fill [Course 1] and [Course 2] and
+      leave [Course 3] and [Course 4] at "0,0" - and all of them send every racer to course 2.
+      Filling 3 and 4 as well, as this used to, publishes two routes no stock track has and no
+      truck asks for. An Evo level that authors alternate racing lines supplies them here;
+      otherwise both AI routes repeat the primary line.
+    */
+    extendedCourses: [0, 1, 2, 3].map(i => {
+      if (i >= EXTENDED_COURSES) return null;
+      const alternate = sit.courses[i + 1];
+      return route(alternate?.segments?.length >= 3 ? alternate : sit.courses[0]);
+    }),
+  };
 }
 
 function placed(position, terrain) {
@@ -603,55 +557,5 @@ function sampleTerrain(data, x, z) {
   return data[x0 + z0 * 256] * (1-fx) * (1-fz) + data[x1 + z0 * 256] * fx * (1-fz)
     + data[x0 + z1 * 256] * (1-fx) * fz + data[x1 + z1 * 256] * fx * fz;
 }
-/*
-  DATA\<stem>.LTE, MTM2's baked terrain light grid: seven bytes per cell, of which only the
-  first (ground) is meaningful here. The remaining six describe ground-box faces and stay zero
-  because Evo authors none.
-
-  This reproduces Traxx's BuildLte: accumulate the cell normal from four cross products over
-  the 64-unit neighbourhood, take |nz|/len as the overhead term, then add a horizontal term.
-  The 160..255 range is the value stock MTM2 ships (ROCKQRY, SUMMIT1-3 and TPARK all use it).
-
-  ⚠ THE HORIZONTAL TERM BELONGS TO THE .LVL SUN VECTOR, NOT TO TASTE. Traxx offers it as a
-  five-way compass - Noon adds nothing, and the other four add or subtract nx or ny - which is
-  the same thing as dotting the sun's normalised horizontal direction with (nx, ny), and that
-  generalises to a sun like Baja Beach's that sits between two compass points. Regressing the
-  stock grids against their own RAW settles the sign: levels whose vector starts +46333 match
-  +nx (TPARK r=0.87, SUMMIT1 r=0.86) and the ones starting -46333 match -nx (BAJA r=0.90).
-  Getting it backwards lights the hemisphere opposite the lens flare.
-*/
-function makeLte(terrain, sun = DEFAULT_SUN) {
-  const out = new Uint8Array(256 * 256 * 7);
-  const raw = terrain.raw;
-  const dark = 160, bright = 255;
-  // The sun's compass direction, in the grid's own axes: LVL east is grid x, LVL north grid y.
-  const horizontal = Math.hypot(sun[0], sun[2]);
-  const sunX = horizontal ? sun[0] / horizontal : 0, sunY = horizontal ? sun[2] / horizontal : 0;
-  for (let y = 0; y < 256; y++) {
-    const row = y << 8;
-    for (let x = 0; x < 256; x++) {
-      const height = raw[x + row];
-      // West, south, east and north neighbours, wrapped exactly as MTM2's grid wraps.
-      const ring = [
-        [-64, 0, raw[((x - 1) & 255) + row]],
-        [0, 64, raw[x + (((y + 1) & 255) << 8)]],
-        [64, 0, raw[((x + 1) & 255) + row]],
-        [0, -64, raw[x + (((y - 1) & 255) << 8)]],
-      ];
-      let nx = 0, ny = 0, nz = 0;
-      for (let i = 0; i < 4; i++) {
-        const [x1, y1, z1] = ring[i], [x2, y2, z2] = ring[(i + 1) & 3];
-        nx += y1 * (z2 - height) - y2 * (z1 - height);
-        ny += x1 * (z2 - height) - x2 * (z1 - height);
-        nz += x1 * y2 - x2 * y1;
-      }
-      const length = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-      const facing = (Math.abs(nz) + sunX * nx + sunY * ny) / length;
-      out[(x + row) * 7] = clamp(dark + Math.trunc((bright - dark) * facing), 8, 255);
-    }
-  }
-  return out;
-}
 function num(value) { return Number(value || 0).toFixed(2); }
-function clean(value) { return String(value).replace(/[\r\n]/g, " ").slice(0, 80); }
 function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }

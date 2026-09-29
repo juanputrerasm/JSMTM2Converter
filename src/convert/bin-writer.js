@@ -1,12 +1,15 @@
-import { ByteWriter } from "../shared/byte-writer.js";
+import { binFaceNormal, writeBin } from "../vendor/openphotex/index.js";
 
 const FIXED = 65536;
 const UV_FIXED = 0xff0000;
 
-// The MRGL records this writer emits (engine 3D.H; numbering as in JSTrackViewer's decoder).
-const MRGL_VLIST = 2, MRGL_TEXTURE = 13, MRGL_MAGNIFY = 20, MRGL_ZFACETTMAP = 24;
-const MRGL_ZGFACETTMAP = 41, MRGL_TEXTURE64 = 62, MRGL_MATERIAL = 63, MRGL_MATFACET = 64;
-const MRGL_MATERIAL2 = 66;
+/*
+  The record layout, the stored normals and the plane terms are OpenPhotex's writeBin. This file
+  decides what goes in: the axes and scale of the vertex words, which facet and material each
+  mesh gets, and which faces are redundant.
+*/
+// The facets this writer chooses between (engine 3D.H).
+const MRGL_ZFACETTMAP = 24, MRGL_ZGFACETTMAP = 41, MRGL_MATFACET = 64;
 
 // MRGL_MATERIAL flags.
 const LIT = 0x0001, GOURAUD = 0x0002, BLEND = 0x0004, ALPHATEST = 0x0008;
@@ -67,9 +70,7 @@ export function writeMtmBin(model, textureNameFor, options = {}) {
     Evo leaves leaves in OPAQUE groups and cuts them out with the texture's alpha regardless.
   */
   const groupsSplitTransparency = meshes.some(mesh => mesh.transparent);
-  const writer = new ByteWriter();
   const vertexCount = meshes.reduce((sum, mesh) => sum + mesh.positions.length / 3, 0);
-  writer.u32(MRGL_MAGNIFY).u32(FIXED).u32(MRGL_VLIST).u32(0).u32(vertexCount);
   /*
     The vertex records exactly as the engine will read them. Normals, plane terms and the
     duplicate test are all computed from these integers rather than from the floats they came
@@ -86,25 +87,20 @@ export function writeMtmBin(model, textureNameFor, options = {}) {
       vertices[cursor++] = (-mesh.positions[i + 2] * scale[2] * 256) | 0;
     }
   }
-  for (const value of vertices) writer.i32(value);
 
   let base = 0;
-  let lastTexture = null;
+  const groups = [];
   const written = faces === "legacy" ? null : new Set();
   for (const mesh of meshes) {
-    const texture = textureNameFor(mesh.textureName) || "DEFAULT.RAW";
-    if (texture !== lastTexture) {
-      const longName = new TextEncoder().encode(texture).length > 15;
-      writer.u32(longName ? MRGL_TEXTURE64 : MRGL_TEXTURE).u32(0).fixed(texture, longName ? 64 : 16);
-      lastTexture = texture;
-    }
     const style = faces === "legacy" ? legacyStyle(mesh) : modelStyle(mesh);
-    if (style.material !== null) {
-      writer.u32(MRGL_MATERIAL).u32(style.material)
-        .i32(0).i32(0).i32(0).i32(FIXED).i32(32 * FIXED).i32(0)
-        .i32(FIXED).i32(FIXED).i32(FIXED).i32(0);
-      if (bumpMaps && mesh.bumpTextureName) writer.u32(MRGL_MATERIAL2).u32(1).i32(FIXED).i32(0).i32(0).i32(0).i32(0).i32(0);
-    }
+    const hasMaterial = style.material !== null;
+    const group = {
+      texture: textureNameFor(mesh.textureName) || "DEFAULT.RAW",
+      opcode: style.op,
+      material: hasMaterial ? { flags: style.material } : null,
+      material2: hasMaterial && bumpMaps && mesh.bumpTextureName ? { flags2: 1 } : null,
+      faces: [],
+    };
     for (let i = 0; i < mesh.indices.length; i += 3) {
       /*
         ⛔ THE CORNERS ARE WRITTEN IN REVERSE, AND THAT IS WHAT MAKES A FACE POINT OUTWARD.
@@ -118,11 +114,11 @@ export function writeMtmBin(model, textureNameFor, options = {}) {
         looked wrong rather than missing.
       */
       const corners = [mesh.indices[i], mesh.indices[i + 2], mesh.indices[i + 1]];
-      const at = corners.map(index => (base + index) * 3);
-      const normal = faceNormal(vertices, at);
+      const vertexIndices = corners.map(index => base + index);
       // A degenerate triangle has no direction to record or surface to draw, and MTM2's own
-      // files never contain one.
-      if (!normal) continue;
+      // files never contain one. writeBin drops it too; it is tested here so it never enters
+      // the duplicate set.
+      if (!binFaceNormal(vertices, vertexIndices)) continue;
       /*
         Evo authors its back faces explicitly - 39% of Snake River's faces and 70-79% of its
         trees sit exactly on another face - so a face repeated with the SAME winding is the
@@ -130,21 +126,20 @@ export function writeMtmBin(model, textureNameFor, options = {}) {
         corners' cyclic order, so a back face (the reverse order) is never mistaken for one.
       */
       if (written) {
-        const key = faceKey(vertices, at);
+        const key = faceKey(vertices, vertexIndices.map(index => index * 3));
         if (written.has(key)) continue;
         written.add(key);
       }
-      writer.u32(style.op).u32(3).i32(normal[0]).i32(normal[1]).i32(normal[2]).i32(planeTerm(normal, vertices, at[0]));
-      for (const index of corners) {
-        writer.u32(base + index)
-          .i32((mesh.uvs[index * 2] || 0) * UV_FIXED)
-          .i32((mesh.uvs[index * 2 + 1] || 0) * UV_FIXED);
-      }
+      group.faces.push({
+        vertexIndices,
+        u: corners.map(index => (mesh.uvs[index * 2] || 0) * UV_FIXED),
+        v: corners.map(index => (mesh.uvs[index * 2 + 1] || 0) * UV_FIXED),
+      });
     }
+    groups.push(group);
     base += mesh.positions.length / 3;
   }
-  writer.u32(0);
-  return writer.finish();
+  return writeBin({ magnify: FIXED, vertices, groups }).bytes;
 
   // The truck path's faces, unchanged: every mesh two-sided, through a material.
   function legacyStyle(mesh) {
@@ -221,46 +216,6 @@ export function alphaProfile(rgba) {
   }
   if (!clear) return null;
   return soft / (rgba.length / 4) > 0.4 ? "blend" : "cutout";
-}
-
-/*
-  The outward normal MTM2 stores on every face record, as 16.16 fixed point.
-
-  This was a constant (0, 1, 0) until it was measured against the real thing: across five
-  stock and community models - BIGFOOT, BFC16L, AXLE3 and the Viper's KAR11 and AST16L - all
-  3,807 faces have their stored normal opposing the cross product of their own corners,
-  without a single exception. So the convention is exact, and a face whose stored normal
-  points somewhere unrelated is lit and culled as though it faced a direction it does not.
-
-  The cross is taken in the component order the vertex records are written in - (x, height,
-  depth) - which is an odd permutation of the (x, depth, height) frame the comparison above
-  is expressed in, so a cross product computed here comes out with the opposite sign to one
-  computed there. Writing the cross unnegated is therefore what produces the opposing stored
-  normal the format wants; the sign was settled by measurement, not by reasoning about it.
-  Stock track scenery agrees: in raw record order its stored normal and corner cross point
-  the same way on 12,670 of 12,678 faces.
-
-  Returns null for a degenerate triangle. Computed in doubles from the integer records: the
-  cross of two edges can pass 2^31, but never 2^53.
-*/
-function faceNormal(vertices, at) {
-  const [a, b, c] = at;
-  const u = [vertices[b] - vertices[a], vertices[b + 1] - vertices[a + 1], vertices[b + 2] - vertices[a + 2]];
-  const v = [vertices[c] - vertices[a], vertices[c + 1] - vertices[a + 1], vertices[c + 2] - vertices[a + 2]];
-  const n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-  const length = Math.hypot(n[0], n[1], n[2]);
-  return length ? n.map(component => Math.round(component / length * FIXED)) : null;
-}
-
-/*
-  The fourth word of a face header: the face's plane term, the stored normal dotted with its own
-  first corner in the file's units (16.16 normal by raw vertex) and wrapped to 32 bits. Stock
-  files hold exactly that on 99.96% of 21,053 faces across eight tracks, to within the rounding
-  of whatever tool computed it. It was written as 0, which puts every face's plane through the
-  model's origin for any engine path that culls or clips with it.
-*/
-function planeTerm(normal, vertices, at) {
-  return Math.round(normal[0] * vertices[at] + normal[1] * vertices[at + 1] + normal[2] * vertices[at + 2]) | 0;
 }
 
 // Identity of a face by its corner positions, rotated to start at the least but never
