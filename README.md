@@ -416,9 +416,12 @@ These cases are logged as conversion limitations rather than silently presented 
 | ES modules | Browser interface, format readers/writers, and conversion stages |
 | Module Web Worker | Runs the conversion without blocking the page |
 | POD reader | Indexes a POD1 or POD2 source archive and resolves referenced assets |
+| [OpenPhotex](https://github.com/juanputrerasm/OpenPhotex) | Parses and writes the POD containers; vendored as plain ES modules in `src/vendor/openphotex/` |
 | Evo parsers | Read SIT, LVL, TEX, TRK, SMF, VEG, RAW/ACT/OPA, and TIFF content |
 | Conversion pipeline | Remaps terrain, converts art and models, and translates placements |
 | MTM2 writers | Build the situation, level, truck manifest, companion files, and validated POD1 archive |
+
+POD reading and writing come from OpenPhotex, the shared Terminal Reality format library. `src/formats/pod2-reader.js` and `src/formats/pod1-writer.js` only move bytes between Blobs and it, and add the converter's own packing policy. The vendored copy is generated, never edited here: change OpenPhotex, then refresh it from the OpenPhotex checkout with `npm run build && npm run vendor -- ../JSMTM2Converter/src/vendor/openphotex`.
 
 ## Contributing
 
