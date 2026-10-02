@@ -31,6 +31,7 @@ const optionBoxes = {
   vegetationNonCollide: document.querySelector("#opt-veg-noncollide"),
   allObjectsNonCollide: document.querySelector("#opt-all-noncollide"),
   seatOnTerrain: document.querySelector("#opt-seat-on-terrain"),
+  limitCheckpoints: document.querySelector("#opt-limit-checkpoints"),
 };
 const heightFactorInput = document.querySelector("#opt-height-factor");
 const stemInput = document.querySelector("#opt-stem");

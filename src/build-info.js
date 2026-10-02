@@ -1,3 +1,3 @@
 // Change this identifier for every diagnostic/release iteration. It is shown in the browser
 // terminal and written into CONVERSION.LOG so cached UI code and generated PODs can be identified.
-export const BUILD_ID = "2026-09-29.41-v0.8.1";
+export const BUILD_ID = "2026-10-01.42-v0.8.2";

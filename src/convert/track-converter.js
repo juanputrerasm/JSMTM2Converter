@@ -31,6 +31,8 @@ const DEFAULT_OPTIONS = {
   allObjectsNonCollide: false,
   // Anchor a model where its own underside meets the terrain; see restingPoint in track-writer.js.
   seatOnTerrain: true,
+  // Keep at most MTM2_MAX_CHECKPOINTS gates; see capCheckpoints.
+  limitCheckpoints: true,
   // Multiplies the automatic terrain fit; see convertTerrain for what happens above 1.
   heightFactor: 1,
   // Empty means derived from the .SIT name; see trackStem.
@@ -95,7 +97,7 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
   };
   const artLabel = options.hdArt ? (options.rawFallback ? "HD PNG + legacy RAW/ACT" : "HD PNG only") : "legacy RAW/ACT only";
   emit(`CONVERTER BUILD ${BUILD_ID}`, 0, "success");
-  emit(`Options: art = ${artLabel}; vegetation ${options.vegetationNonCollide ? "non-collide" : "solid"}; ${options.allObjectsNonCollide ? "all scenery non-collide" : "scenery solid"}; models seated ${options.seatOnTerrain ? "where they rest" : "on the ground under their centre"}.`, 1);
+  emit(`Options: art = ${artLabel}; vegetation ${options.vegetationNonCollide ? "non-collide" : "solid"}; ${options.allObjectsNonCollide ? "all scenery non-collide" : "scenery solid"}; models seated ${options.seatOnTerrain ? "where they rest" : "on the ground under their centre"}; checkpoints ${options.limitCheckpoints ? `limited to ${MTM2_MAX_CHECKPOINTS}` : "unlimited"}.`, 1);
   emit(`Opening ${file.name || "POD archive"}...`, 2);
   const pod = await readPod(file);
   emit(`${pod.format} directory: ${pod.entries.length} entries.`, 7);
@@ -107,6 +109,11 @@ export async function convertTrack(file, report = () => {}, requested = {}) {
   const texEntry = mustResolve(pod, lvl.texName, "DATA", ".TEX");
   const tex = parseEvoTex(await readEntry(pod, texEntry), texEntry.name);
   warnings.push(...sit.warnings, ...tex.warnings);
+  if (options.limitCheckpoints) capCheckpoints(sit, warnings);
+  else {
+    const gates = sit.boxes.filter(isCheckpoint).length;
+    if (gates > MTM2_MAX_CHECKPOINTS) warnings.push(`This track has ${gates} checkpoints and MTM2 holds at most ${MTM2_MAX_CHECKPOINTS}; with the limit off they were all kept, and the engine and Traxx will read past the end of the checkpoint table.`);
+  }
   if (tex.shadowCount) warnings.push(`${tex.shadowCount} Evo baked shadow textures were replaced by MTM2 dynamic lighting.`);
   if (lvl.water.tideHeight || lvl.water.tidePeriod) warnings.push("Animated Evo water tide was reduced to MTM2's static water height.");
 
@@ -483,6 +490,37 @@ function evenlyThin(values, limit) {
 }
 
 function isCheckpoint(box) { return box.sourceClass === "CCheckpoint" || box.boxType === 6; }
+
+/*
+  MTM2 holds at most 20 checkpoints. Every truck record stores 20 checkpoint times per lap and
+  Traxx refuses a 21st ("Max. 20 Checkpoints!", TraxxViewEdit.cpp). Evo has no such cap:
+  Roanoke River has 21, and the 21st sent both the engine and Traxx reading past the end of
+  the checkpoint table, which scrambled the routes.
+
+  The first and last gates stay. Of the rest, the gate dropped is the one whose removal shortens
+  the way through its neighbours the least - a gate on the straight line between two others adds
+  nothing to the route. Gates keep their order, so the pass sequence is unchanged.
+*/
+const MTM2_MAX_CHECKPOINTS = 20;
+
+function capCheckpoints(sit, warnings) {
+  const gates = sit.boxes.filter(isCheckpoint);
+  if (gates.length <= MTM2_MAX_CHECKPOINTS) return;
+  const apart = (a, b) => Math.hypot(a.position[0] - b.position[0], a.position[2] - b.position[2]);
+  const kept = [...gates];
+  while (kept.length > MTM2_MAX_CHECKPOINTS) {
+    let drop = 1, least = Infinity;
+    for (let i = 1; i < kept.length - 1; i++) {
+      const detour = apart(kept[i - 1], kept[i]) + apart(kept[i], kept[i + 1]) - apart(kept[i - 1], kept[i + 1]);
+      if (detour < least) { least = detour; drop = i; }
+    }
+    kept.splice(drop, 1);
+  }
+  const keep = new Set(kept);
+  const dropped = gates.map((gate, i) => keep.has(gate) ? null : `#${i + 1}`).filter(Boolean);
+  sit.boxes = sit.boxes.filter(box => !isCheckpoint(box) || keep.has(box));
+  warnings.push(`MTM2 holds at most ${MTM2_MAX_CHECKPOINTS} checkpoints; this track has ${gates.length}. Dropped checkpoint ${dropped.join(", ")}, the one${dropped.length > 1 ? "s" : ""} adding least to the route.`);
+}
 
 function mustResolve(pod, name, folder, extension) { const entry = resolveWithExtensions(pod, name, folder, [extension]); if (!entry) throw new Error(`Required ${extension} resource not found: ${name}`); return entry; }
 function resolveWithExtensions(pod, name, folder, extensions) { let entry = resolveEntry(pod, name, folder); if (entry) return entry; for (const ext of extensions) { entry = resolveEntry(pod, replaceExtension(name, ext), folder); if (entry) return entry; } return null; }
